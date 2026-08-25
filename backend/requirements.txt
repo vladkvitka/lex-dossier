@@ -7,3 +7,6 @@ passlib[bcrypt]
 bcrypt==4.0.1
 python-jose[cryptography]
 pydantic
+python-multipart
+docx2txt
+python-docx

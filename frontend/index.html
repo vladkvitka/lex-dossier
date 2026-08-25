@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Лекс.Досье</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===== ЭКРАН ВХОДА ===== -->
+<div class="login-shell" id="loginShell">
+  <div class="login-card">
+    <div class="login-brand">Лекс.Досье</div>
+    <div class="login-tag">Система подготовки документов</div>
+    <div class="login-error" id="loginError"></div>
+    <div class="field">
+      <label>Email</label>
+      <input type="email" id="loginEmail" autocomplete="username">
+    </div>
+    <div class="field">
+      <label>Пароль</label>
+      <input type="password" id="loginPassword" autocomplete="current-password">
+    </div>
+    <button class="btn-primary" style="width:100%;" id="loginBtn" onclick="doLogin()">Войти</button>
+  </div>
+</div>
+
+<!-- ===== ОСНОВНОЕ ПРИЛОЖЕНИЕ ===== -->
+<div class="app" id="appShell" style="display:none;">
+
+  <div class="topbar">
+    <div class="brand">
+      <div class="brand-mark">Лекс.Досье</div>
+      <div class="brand-tag">Система подготовки документов</div>
+    </div>
+    <div class="top-right">
+      <div class="user-chip">
+        <div class="avatar" id="userAvatar">—</div>
+        <span id="userName">—</span>
+      </div>
+      <button class="logout-btn" onclick="doLogout()">Выйти</button>
+    </div>
+  </div>
+
+  <div class="body-row">
+
+    <!-- ===== НАВИГАЦИЯ ДЛЯ ЮРИСТА ===== -->
+    <div class="sidenav" id="nav-lawyer" style="display:none;">
+      <div class="sidenav-section">
+        <div class="sidenav-label">Рабочее пространство</div>
+        <button class="nav-item active" data-nav="lawyer-templates" onclick="switchNav('lawyer-templates', this)">Шаблоны документов</button>
+      </div>
+    </div>
+
+    <!-- ===== НАВИГАЦИЯ ДЛЯ АДМИНА ===== -->
+    <div class="sidenav" id="nav-admin" style="display:none;">
+      <div class="sidenav-section">
+        <div class="sidenav-label">Управление</div>
+        <button class="nav-item active" data-nav="admin-categories" onclick="switchNav('admin-categories', this)">Категории</button>
+        <button class="nav-item" data-nav="admin-templates" onclick="switchNav('admin-templates', this)">Шаблоны</button>
+      </div>
+    </div>
+
+    <div class="main">
+
+      <!-- ===== ЮРИСТ: СПИСОК ШАБЛОНОВ ===== -->
+      <div class="screen" id="screen-lawyer-templates">
+        <h1 class="page-title">Шаблоны документов</h1>
+        <p class="page-sub">Опубликованные шаблоны, доступные для работы</p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Название</th><th>Категория</th><th></th></tr></thead>
+            <tbody id="lawyerTmplBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ===== АДМИН: КАТЕГОРИИ ===== -->
+      <div class="screen" id="screen-admin-categories">
+        <h1 class="page-title">Дерево категорий</h1>
+        <p class="page-sub">Структура направлений, по которой юристы находят шаблоны</p>
+
+        <div class="upload-zone">
+          <div class="field">
+            <label>Название новой категории</label>
+            <input id="newCatName" placeholder="Например: Жилищные споры">
+          </div>
+          <div class="field">
+            <label>Направление</label>
+            <select id="newCatBranch">
+              <option value="">— выберите направление —</option>
+              <option value="civil_admin">Гражданские и административные дела</option>
+              <option value="svo">Участники СВО</option>
+            </select>
+          </div>
+          <div class="field">
+            <label>Родительская категория (необязательно)</label>
+            <select id="newCatParent"><option value="">— без родителя, верхний уровень —</option></select>
+          </div>
+          <button class="btn-primary" id="addCatBtn" onclick="createCategory()">Добавить категорию</button>
+        </div>
+
+        <div class="tree" id="adminTree"></div>
+      </div>
+
+      <!-- ===== АДМИН: ШАБЛОНЫ ===== -->
+      <div class="screen" id="screen-admin-templates">
+        <h1 class="page-title">Библиотека шаблонов</h1>
+        <p class="page-sub">Эталонные .docx-файлы с плейсхолдерами вида {{ключ}}</p>
+
+        <div class="upload-zone">
+          <div class="field">
+            <label>Название шаблона</label>
+            <input id="newTmplName" placeholder="Например: Исковое заявление о взыскании">
+          </div>
+          <div class="field">
+            <label>Категория</label>
+            <select id="newTmplCategory"><option value="">— выберите категорию —</option></select>
+          </div>
+          <div class="field">
+            <label>Описание (необязательно)</label>
+            <textarea id="newTmplDescription" rows="2" placeholder="Короткая заметка о шаблоне"></textarea>
+          </div>
+          <div class="field">
+            <label>Файл .docx</label>
+            <input type="file" id="newTmplFile" accept=".docx">
+          </div>
+          <button class="btn-primary" id="uploadTmplBtn" onclick="uploadTemplate()">Загрузить и найти поля</button>
+          <div class="login-error" id="uploadError" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Название</th><th>Категория</th><th>Статус</th><th></th></tr></thead>
+            <tbody id="adminTmplBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ===== АДМИН: ПОЛЯ ШАБЛОНА ===== -->
+      <div class="screen" id="screen-admin-fields">
+        <h1 class="page-title" id="feTitle">Поля шаблона</h1>
+        <p class="page-sub">Плейсхолдеры, найденные внутри документа при загрузке</p>
+        <button class="btn" style="margin-bottom:16px;" onclick="switchNav('admin-templates', document.querySelector('[data-nav=admin-templates]'))">← К шаблонам</button>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Плейсхолдер</th><th>Название поля</th><th>Тип</th><th>Обязательное</th><th>Общее для пакета</th></tr></thead>
+            <tbody id="feTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="app.js"></script>
+</body>
+</html>

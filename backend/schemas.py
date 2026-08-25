@@ -32,3 +32,31 @@ class CategoryOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class TemplateFieldOut(BaseModel):
+    id: UUID
+    field_key: str
+    label: str
+    field_type: str
+    is_required: bool
+    is_shared: bool
+
+    class Config:
+        from_attributes = True
+
+
+class TemplateOut(BaseModel):
+    id: UUID
+    category_id: UUID
+    name: str
+    description: Optional[str] = None
+    status: str
+    file_version: int
+
+    class Config:
+        from_attributes = True
+
+
+class TemplateDetailOut(TemplateOut):
+    fields: List[TemplateFieldOut] = []

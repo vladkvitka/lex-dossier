@@ -1,4 +1,5 @@
-from typing import Optional, List
+from typing import Optional, List, Dict
+from datetime import datetime
 from uuid import UUID
 from pydantic import BaseModel
 
@@ -60,3 +61,49 @@ class TemplateOut(BaseModel):
 
 class TemplateDetailOut(TemplateOut):
     fields: List[TemplateFieldOut] = []
+
+
+# ---------- Дела ----------
+
+class CaseCreate(BaseModel):
+    category_id: UUID
+    client_name: str
+
+
+class CaseOut(BaseModel):
+    id: UUID
+    client_name: str
+    category_id: UUID
+    status: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CaseFieldValueOut(BaseModel):
+    field_key: str
+    value: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class CaseDocumentOut(BaseModel):
+    id: UUID
+    template_id: UUID
+    template_name: str
+    has_pdf: bool
+    generated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class CaseDetailOut(CaseOut):
+    fields: List[CaseFieldValueOut] = []
+    documents: List[CaseDocumentOut] = []
+
+
+class GenerateRequest(BaseModel):
+    template_ids: List[UUID]

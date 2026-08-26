@@ -12,6 +12,7 @@ let state = {
   fullName: localStorage.getItem('lex_full_name') || null,
   categories: [],
   templates: [],
+  cases: [],
 };
 
 // Направления дел — по данным из prototype.html (data-branch="civil_admin"/"svo").
@@ -114,12 +115,15 @@ async function enterApp(){
     document.getElementById('nav-lawyer').style.display = 'none';
     await loadCategories();
     await loadTemplates();
+    await loadCasesList();
     switchNav('admin-categories', document.querySelector('[data-nav=admin-categories]'));
   } else {
     document.getElementById('nav-lawyer').style.display = 'block';
     document.getElementById('nav-admin').style.display = 'none';
+    await loadCategories();
     await loadTemplates();
-    switchNav('lawyer-templates', document.querySelector('[data-nav=lawyer-templates]'));
+    await loadCasesList();
+    switchNav('cases-list', document.querySelector('#nav-lawyer [data-nav=cases-list]'));
   }
 }
 
@@ -191,6 +195,10 @@ function renderCategorySelects(){
     '<option value="">— без родителя, верхний уровень —</option>' + opts;
   document.getElementById('newTmplCategory').innerHTML =
     '<option value="">— выберите категорию —</option>' + opts;
+  const caseCatSelect = document.getElementById('newCaseCategory');
+  if (caseCatSelect){
+    caseCatSelect.innerHTML = '<option value="">— выберите категорию —</option>' + opts;
+  }
 }
 
 async function createCategory(){
@@ -338,6 +346,236 @@ async function openTemplateFields(id){
     switchNav('admin-fields', null);
   } catch (err){
     toast('Ошибка: ' + err.message);
+  }
+}
+
+// ---------- дела ----------
+
+let currentCase = null;           // текущее открытое дело (CaseDetailOut)
+let currentCaseSelectedTemplates = new Set(); // выбранные для дела шаблоны (id)
+
+async function loadCasesList(){
+  state.cases = await api('/cases');
+  renderCasesList();
+}
+
+function statusLabel(status){
+  const map = { draft: 'Черновик', in_progress: 'В работе', ready: 'Готово', archived: 'В архиве' };
+  return map[status] || status;
+}
+
+function renderCasesList(){
+  const body = document.getElementById('casesListBody');
+  if (!body) return;
+  if (!state.cases.length){
+    body.innerHTML = '<tr><td colspan="5" style="color:var(--muted);">Дел пока нет</td></tr>';
+    return;
+  }
+  body.innerHTML = state.cases.map(c => `
+    <tr>
+      <td>${escapeHtml(c.client_name)}</td>
+      <td>${escapeHtml(categoryName(c.category_id))}</td>
+      <td><span class="badge badge-draft">${statusLabel(c.status)}</span></td>
+      <td>${new Date(c.created_at).toLocaleDateString('ru-RU')}</td>
+      <td style="text-align:right;"><button class="btn btn-sm" onclick="openCase('${c.id}')">Открыть</button></td>
+    </tr>`).join('');
+}
+
+async function createCase(){
+  const client = document.getElementById('newCaseClient').value.trim();
+  const categoryId = document.getElementById('newCaseCategory').value;
+  const errBox = document.getElementById('newCaseError');
+  errBox.style.display = 'none';
+
+  if (!client || !categoryId){
+    errBox.textContent = 'Укажите клиента и категорию';
+    errBox.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('createCaseBtn');
+  btn.disabled = true;
+  try {
+    const newCase = await api('/cases', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ category_id: categoryId, client_name: client })
+    });
+    document.getElementById('newCaseClient').value = '';
+    document.getElementById('newCaseCategory').value = '';
+    await loadCasesList();
+    await openCase(newCase.id);
+  } catch (err){
+    errBox.textContent = 'Ошибка: ' + err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function openCase(caseId){
+  try {
+    currentCase = await api(`/cases/${caseId}`);
+    currentCaseSelectedTemplates = new Set(currentCase.documents.map(d => d.template_id));
+
+    document.getElementById('caseTitle').textContent = currentCase.client_name;
+    document.getElementById('caseSub').textContent =
+      categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status);
+
+    // Список опубликованных шаблонов в категории дела, доступных для выбора
+    if (!state.templates.length) await loadTemplates();
+    const available = state.templates.filter(t => t.category_id === currentCase.category_id && t.status === 'published');
+
+    renderCaseTemplatesBox(available);
+    await renderCaseFieldsForm(available);
+    renderCaseDocuments();
+
+    switchNav('case-detail', null);
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
+function renderCaseTemplatesBox(available){
+  const box = document.getElementById('caseTemplatesBox');
+  if (!available.length){
+    box.innerHTML = '<div style="color:var(--muted);">В этой категории пока нет опубликованных шаблонов</div>';
+    return;
+  }
+  box.innerHTML = available.map(t => `
+    <label style="display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13.5px;">
+      <input type="checkbox" value="${t.id}" ${currentCaseSelectedTemplates.has(t.id) ? 'checked' : ''}
+        onchange="onCaseTemplateToggle()">
+      ${escapeHtml(t.name)}
+    </label>`).join('');
+}
+
+async function onCaseTemplateToggle(){
+  const boxes = document.querySelectorAll('#caseTemplatesBox input[type=checkbox]');
+  currentCaseSelectedTemplates = new Set(
+    Array.from(boxes).filter(b => b.checked).map(b => b.value)
+  );
+  const available = state.templates.filter(t => t.category_id === currentCase.category_id && t.status === 'published');
+  await renderCaseFieldsForm(available);
+}
+
+async function renderCaseFieldsForm(available){
+  const formBox = document.getElementById('caseFormBox');
+  const fieldsBox = document.getElementById('caseFieldsBox');
+
+  if (!currentCaseSelectedTemplates.size){
+    formBox.style.display = 'none';
+    return;
+  }
+  formBox.style.display = 'block';
+
+  // Собираем объединённый список полей по всем выбранным шаблонам,
+  // без дублей по field_key (одинаковый ключ = одно поле формы дела).
+  const selected = available.filter(t => currentCaseSelectedTemplates.has(t.id));
+  const fieldsByKey = new Map();
+  for (const t of selected){
+    const detail = await api(`/templates/${t.id}`);
+    for (const f of detail.fields){
+      if (!fieldsByKey.has(f.field_key)) fieldsByKey.set(f.field_key, f);
+    }
+  }
+
+  const existingValues = {};
+  (currentCase.fields || []).forEach(f => { existingValues[f.field_key] = f.value; });
+
+  const rows = Array.from(fieldsByKey.values());
+  fieldsBox.innerHTML = rows.length
+    ? rows.map(f => `
+        <div class="field">
+          <label>${escapeHtml(f.label)}${f.is_required ? ' *' : ''}</label>
+          ${f.field_type === 'textarea'
+            ? `<textarea rows="3" data-field-key="${escapeHtml(f.field_key)}">${escapeHtml(existingValues[f.field_key] || '')}</textarea>`
+            : `<input data-field-key="${escapeHtml(f.field_key)}" value="${escapeHtml(existingValues[f.field_key] || '')}">`}
+        </div>`).join('')
+    : '<div style="color:var(--muted);">В выбранных документах не найдено полей</div>';
+}
+
+async function saveCaseFields(){
+  const inputs = document.querySelectorAll('#caseFieldsBox [data-field-key]');
+  const values = {};
+  inputs.forEach(el => { values[el.getAttribute('data-field-key')] = el.value; });
+
+  const errBox = document.getElementById('caseFormError');
+  errBox.style.display = 'none';
+  try {
+    currentCase = await api(`/cases/${currentCase.id}/fields`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(values)
+    });
+    toast('Данные сохранены');
+  } catch (err){
+    errBox.textContent = 'Ошибка сохранения: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function generateDocuments(){
+  if (!currentCaseSelectedTemplates.size){
+    toast('Сначала выберите хотя бы один документ');
+    return;
+  }
+  const errBox = document.getElementById('caseFormError');
+  errBox.style.display = 'none';
+  try {
+    // Сначала сохраняем текущие значения формы, чтобы генерация шла по свежим данным
+    await saveCaseFields();
+    await api(`/cases/${currentCase.id}/generate`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ template_ids: Array.from(currentCaseSelectedTemplates) })
+    });
+    currentCase = await api(`/cases/${currentCase.id}`);
+    renderCaseDocuments();
+    toast('Документы сгенерированы');
+  } catch (err){
+    errBox.textContent = 'Ошибка генерации: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
+function renderCaseDocuments(){
+  const box = document.getElementById('caseDocsBox');
+  const body = document.getElementById('caseDocsBody');
+  const docs = (currentCase && currentCase.documents) || [];
+  if (!docs.length){
+    box.style.display = 'none';
+    return;
+  }
+  box.style.display = 'block';
+  body.innerHTML = docs.map(d => `
+    <tr>
+      <td>${escapeHtml(d.template_name)}</td>
+      <td>${new Date(d.generated_at).toLocaleString('ru-RU')}</td>
+      <td style="text-align:right;white-space:nowrap;">
+        <button class="btn btn-sm" onclick="downloadCaseDocument('${d.id}','docx')">Скачать .docx</button>
+        ${d.has_pdf ? `<button class="btn btn-sm" onclick="downloadCaseDocument('${d.id}','pdf')">Скачать .pdf</button>` : ''}
+      </td>
+    </tr>`).join('');
+}
+
+async function downloadCaseDocument(documentId, format){
+  try {
+    const res = await fetch(`${API}/cases/${currentCase.id}/documents/${documentId}/download?format=${format}`, {
+      headers: { 'Authorization': 'Bearer ' + state.token }
+    });
+    if (res.status === 401){ doLogout(); throw new Error('Сессия истекла'); }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `document.${format}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (err){
+    toast('Ошибка скачивания: ' + err.message);
   }
 }
 

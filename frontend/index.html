@@ -73,7 +73,7 @@
       <div class="screen active" id="screen-cases-list">
         <h1 class="page-title">Дела</h1>
         <p class="page-sub">Дела клиентов и статус подготовки документов по ним</p>
-        <button class="btn-primary" style="margin-bottom:16px;" onclick="switchNav('case-new', null)">+ Новое дело</button>
+        <button class="btn-primary" style="margin-bottom:16px;" onclick="openNewCaseForm()">+ Новое дело</button>
         <div class="table-wrap">
           <table>
             <thead><tr><th>Клиент</th><th>Категория</th><th>Статус</th><th>Создано</th><th></th></tr></thead>
@@ -224,6 +224,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>

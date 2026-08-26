@@ -58,6 +58,25 @@ class TemplateField(Base):
     sort_order = Column(Integer, default=0)
 
 
+class TemplatePackage(Base):
+    """Пакет документов: набор шаблонов, которые типично идут вместе для категории."""
+    __tablename__ = "template_packages"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    category_id = Column(UUID(as_uuid=True), ForeignKey("categories.id"), nullable=False)
+    name = Column(String, nullable=False)
+    is_active = Column(Boolean, default=True)
+
+
+class TemplatePackageItem(Base):
+    __tablename__ = "template_package_items"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    package_id = Column(UUID(as_uuid=True), ForeignKey("template_packages.id"), nullable=False)
+    template_id = Column(UUID(as_uuid=True), ForeignKey("templates.id"), nullable=False)
+    sort_order = Column(Integer, default=0)
+
+
 class Case(Base):
     """Дело клиента — набор данных, из которых генерируются документы."""
     __tablename__ = "cases"
@@ -65,6 +84,7 @@ class Case(Base):
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     client_name = Column(String, nullable=False)
     category_id = Column(UUID(as_uuid=True), ForeignKey("categories.id"), nullable=False)
+    package_id = Column(UUID(as_uuid=True), ForeignKey("template_packages.id"), nullable=True)
     raw_narrative = Column(Text, nullable=True)  # сырой текст фабулы — задел под этап ИИ
     status = Column(String, default="draft")  # draft | in_progress | ready | archived
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)

@@ -19,6 +19,11 @@ from schemas import (
     TemplateOut,
     TemplateDetailOut,
     TemplateFieldOut,
+    TemplateFieldsUpdateRequest,
+    PackageCreate,
+    PackageUpdate,
+    PackageOut,
+    PackageItemOut,
     CaseCreate,
     CaseOut,
     CaseDetailOut,
@@ -219,6 +224,151 @@ def publish_template(
     return template
 
 
+@app.post("/api/templates/{template_id}/fields", response_model=TemplateDetailOut)
+def update_template_fields(
+    template_id: uuid.UUID,
+    data: TemplateFieldsUpdateRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Массовое обновление карты полей: тип, обязательность, is_shared и
+    shared_group_key (по нему объединяются одинаковые по смыслу поля разных
+    шаблонов внутри одного дела/пакета)."""
+    template = db.query(models.Template).filter(models.Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+
+    fields_by_id = {
+        f.id: f
+        for f in db.query(models.TemplateField).filter(models.TemplateField.template_id == template_id).all()
+    }
+    for upd in data.fields:
+        field = fields_by_id.get(upd.id)
+        if not field:
+            raise HTTPException(status_code=404, detail=f"Поле {upd.id} не найдено в этом шаблоне")
+        field.label = upd.label
+        field.field_type = upd.field_type
+        field.is_required = upd.is_required
+        field.is_shared = upd.is_shared
+        field.shared_group_key = upd.shared_group_key if upd.is_shared else None
+    db.commit()
+
+    fields = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.template_id == template_id)
+        .order_by(models.TemplateField.sort_order)
+        .all()
+    )
+    return TemplateDetailOut(
+        id=template.id,
+        category_id=template.category_id,
+        name=template.name,
+        description=template.description,
+        status=template.status,
+        file_version=template.file_version,
+        fields=[TemplateFieldOut.model_validate(f) for f in fields],
+    )
+
+
+# ---------- Пакеты ----------
+
+def _package_to_out(db: Session, package: models.TemplatePackage) -> PackageOut:
+    rows = (
+        db.query(models.TemplatePackageItem, models.Template.name)
+        .join(models.Template, models.Template.id == models.TemplatePackageItem.template_id)
+        .filter(models.TemplatePackageItem.package_id == package.id)
+        .order_by(models.TemplatePackageItem.sort_order)
+        .all()
+    )
+    return PackageOut(
+        id=package.id,
+        category_id=package.category_id,
+        name=package.name,
+        is_active=package.is_active,
+        items=[
+            PackageItemOut(template_id=item.template_id, template_name=name, sort_order=item.sort_order)
+            for item, name in rows
+        ],
+    )
+
+
+@app.get("/api/packages", response_model=List[PackageOut])
+def list_packages(
+    category_id: Optional[uuid.UUID] = None,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    query = db.query(models.TemplatePackage).filter(models.TemplatePackage.is_active == True)
+    if category_id:
+        query = query.filter(models.TemplatePackage.category_id == category_id)
+    return [_package_to_out(db, p) for p in query.all()]
+
+
+@app.post("/api/packages", response_model=PackageOut)
+def create_package(
+    data: PackageCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    category = db.query(models.Category).filter(models.Category.id == data.category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+
+    package = models.TemplatePackage(
+        id=uuid.uuid4(),
+        category_id=data.category_id,
+        name=data.name,
+        is_active=True,
+    )
+    db.add(package)
+    db.commit()
+    db.refresh(package)
+
+    for index, template_id in enumerate(data.template_ids):
+        db.add(
+            models.TemplatePackageItem(
+                id=uuid.uuid4(),
+                package_id=package.id,
+                template_id=template_id,
+                sort_order=index,
+            )
+        )
+    db.commit()
+    return _package_to_out(db, package)
+
+
+@app.patch("/api/packages/{package_id}", response_model=PackageOut)
+def update_package(
+    package_id: uuid.UUID,
+    data: PackageUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    package = db.query(models.TemplatePackage).filter(models.TemplatePackage.id == package_id).first()
+    if not package:
+        raise HTTPException(status_code=404, detail="Пакет не найден")
+
+    if data.name is not None:
+        package.name = data.name
+    if data.is_active is not None:
+        package.is_active = data.is_active
+    if data.template_ids is not None:
+        db.query(models.TemplatePackageItem).filter(
+            models.TemplatePackageItem.package_id == package_id
+        ).delete()
+        for index, template_id in enumerate(data.template_ids):
+            db.add(
+                models.TemplatePackageItem(
+                    id=uuid.uuid4(),
+                    package_id=package_id,
+                    template_id=template_id,
+                    sort_order=index,
+                )
+            )
+    db.commit()
+    return _package_to_out(db, package)
+
+
 # ---------- Дела ----------
 
 def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
@@ -238,6 +388,7 @@ def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
         id=case.id,
         client_name=case.client_name,
         category_id=case.category_id,
+        package_id=case.package_id,
         status=case.status,
         created_at=case.created_at,
         fields=[CaseFieldValueOut.model_validate(f) for f in field_values],
@@ -275,10 +426,16 @@ def create_case(
     if not category:
         raise HTTPException(status_code=404, detail="Категория не найдена")
 
+    if data.package_id:
+        package = db.query(models.TemplatePackage).filter(models.TemplatePackage.id == data.package_id).first()
+        if not package:
+            raise HTTPException(status_code=404, detail="Пакет не найден")
+
     case = models.Case(
         id=uuid.uuid4(),
         client_name=data.client_name,
         category_id=data.category_id,
+        package_id=data.package_id,
         status="draft",
         created_by=current_user.id,
     )
@@ -385,9 +542,15 @@ def generate_documents(
             .filter(models.TemplateField.template_id == template_id)
             .all()
         )
-        # Каждому полю шаблона подставляем значение дела, если оно есть,
-        # иначе — пустую строку (чтобы docxtpl не падал на отсутствующей переменной).
-        context = {f.field_key: case_field_values.get(f.field_key, "") for f in template_fields}
+        # Каждому плейсхолдеру шаблона (field_key) подставляем значение дела.
+        # Если поле общее (is_shared) и у него задан shared_group_key —
+        # значение ищем именно по нему (так реализовано объединение
+        # одинаковых по смыслу полей между разными шаблонами пакета).
+        # Если значения нет — подставляем пустую строку, чтобы docxtpl не падал.
+        context = {}
+        for f in template_fields:
+            lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
+            context[f.field_key] = case_field_values.get(lookup_key, "")
 
         document_id = uuid.uuid4()
         docx_path = os.path.join(case_dir, f"{document_id}.docx")

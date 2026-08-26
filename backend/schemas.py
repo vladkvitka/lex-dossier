@@ -42,9 +42,23 @@ class TemplateFieldOut(BaseModel):
     field_type: str
     is_required: bool
     is_shared: bool
+    shared_group_key: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class TemplateFieldUpdate(BaseModel):
+    id: UUID
+    label: str
+    field_type: str
+    is_required: bool
+    is_shared: bool
+    shared_group_key: Optional[str] = None
+
+
+class TemplateFieldsUpdateRequest(BaseModel):
+    fields: List[TemplateFieldUpdate]
 
 
 class TemplateOut(BaseModel):
@@ -63,17 +77,47 @@ class TemplateDetailOut(TemplateOut):
     fields: List[TemplateFieldOut] = []
 
 
+# ---------- Пакеты ----------
+
+class PackageCreate(BaseModel):
+    category_id: UUID
+    name: str
+    template_ids: List[UUID]
+
+
+class PackageUpdate(BaseModel):
+    name: Optional[str] = None
+    is_active: Optional[bool] = None
+    template_ids: Optional[List[UUID]] = None
+
+
+class PackageItemOut(BaseModel):
+    template_id: UUID
+    template_name: str
+    sort_order: int
+
+
+class PackageOut(BaseModel):
+    id: UUID
+    category_id: UUID
+    name: str
+    is_active: bool
+    items: List[PackageItemOut] = []
+
+
 # ---------- Дела ----------
 
 class CaseCreate(BaseModel):
     category_id: UUID
     client_name: str
+    package_id: Optional[UUID] = None
 
 
 class CaseOut(BaseModel):
     id: UUID
     client_name: str
     category_id: UUID
+    package_id: Optional[UUID] = None
     status: str
     created_at: datetime
 

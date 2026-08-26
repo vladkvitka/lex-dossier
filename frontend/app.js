@@ -381,6 +381,13 @@ function renderCasesList(){
     </tr>`).join('');
 }
 
+async function openNewCaseForm(){
+  if (!state.categories.length){
+    await loadCategories();
+  }
+  switchNav('case-new', null);
+}
+
 async function createCase(){
   const client = document.getElementById('newCaseClient').value.trim();
   const categoryId = document.getElementById('newCaseCategory').value;

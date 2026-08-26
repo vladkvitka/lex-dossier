@@ -201,6 +201,10 @@ function renderCategorySelects(){
   if (caseCatSelect){
     caseCatSelect.innerHTML = '<option value="">— выберите категорию —</option>' + opts;
   }
+  const pkgCatSelect = document.getElementById('newPkgCategory');
+  if (pkgCatSelect){
+    pkgCatSelect.innerHTML = '<option value="">— выберите категорию —</option>' + opts;
+  }
 }
 
 async function createCategory(){

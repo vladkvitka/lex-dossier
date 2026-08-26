@@ -10,3 +10,4 @@ pydantic
 python-multipart
 docx2txt
 python-docx
+docxtpl==0.16.7

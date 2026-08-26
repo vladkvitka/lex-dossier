@@ -49,12 +49,17 @@
     <div class="sidenav" id="nav-lawyer" style="display:none;">
       <div class="sidenav-section">
         <div class="sidenav-label">Рабочее пространство</div>
-        <button class="nav-item active" data-nav="lawyer-templates" onclick="switchNav('lawyer-templates', this)">Шаблоны документов</button>
+        <button class="nav-item active" data-nav="cases-list" onclick="switchNav('cases-list', this)">Дела</button>
+        <button class="nav-item" data-nav="lawyer-templates" onclick="switchNav('lawyer-templates', this)">Шаблоны документов</button>
       </div>
     </div>
 
     <!-- ===== НАВИГАЦИЯ ДЛЯ АДМИНА ===== -->
     <div class="sidenav" id="nav-admin" style="display:none;">
+      <div class="sidenav-section">
+        <div class="sidenav-label">Рабочее пространство</div>
+        <button class="nav-item" data-nav="cases-list" onclick="switchNav('cases-list', this)">Дела</button>
+      </div>
       <div class="sidenav-section">
         <div class="sidenav-label">Управление</div>
         <button class="nav-item active" data-nav="admin-categories" onclick="switchNav('admin-categories', this)">Категории</button>
@@ -63,6 +68,68 @@
     </div>
 
     <div class="main">
+
+      <!-- ===== СПИСОК ДЕЛ ===== -->
+      <div class="screen active" id="screen-cases-list">
+        <h1 class="page-title">Дела</h1>
+        <p class="page-sub">Дела клиентов и статус подготовки документов по ним</p>
+        <button class="btn-primary" style="margin-bottom:16px;" onclick="switchNav('case-new', null)">+ Новое дело</button>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Клиент</th><th>Категория</th><th>Статус</th><th>Создано</th><th></th></tr></thead>
+            <tbody id="casesListBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ===== НОВОЕ ДЕЛО ===== -->
+      <div class="screen" id="screen-case-new">
+        <h1 class="page-title">Новое дело</h1>
+        <p class="page-sub">Укажите клиента и категорию — дальше выберете документы и заполните данные</p>
+        <button class="btn" style="margin-bottom:16px;" onclick="switchNav('cases-list', null)">← К списку дел</button>
+        <div class="upload-zone">
+          <div class="field">
+            <label>Имя клиента</label>
+            <input id="newCaseClient" placeholder="Например: Иванов Иван Иванович">
+          </div>
+          <div class="field">
+            <label>Категория</label>
+            <select id="newCaseCategory"><option value="">— выберите категорию —</option></select>
+          </div>
+          <button class="btn-primary" id="createCaseBtn" onclick="createCase()">Создать дело</button>
+          <div class="login-error" id="newCaseError" style="margin-top:10px;"></div>
+        </div>
+      </div>
+
+      <!-- ===== КАРТОЧКА ДЕЛА ===== -->
+      <div class="screen" id="screen-case-detail">
+        <h1 class="page-title" id="caseTitle">Дело</h1>
+        <p class="page-sub" id="caseSub"></p>
+        <button class="btn" style="margin-bottom:16px;" onclick="switchNav('cases-list', null)">← К списку дел</button>
+
+        <div class="notice">1. Выберите документы → 2. Заполните форму → 3. Сгенерируйте и скачайте</div>
+
+        <h2 style="font-size:15px;margin:22px 0 10px;">Документы для этого дела</h2>
+        <div id="caseTemplatesBox" class="upload-zone" style="max-width:640px;"></div>
+
+        <div id="caseFormBox" style="display:none;">
+          <h2 style="font-size:15px;margin:26px 0 10px;">Данные дела</h2>
+          <div class="upload-zone" style="max-width:640px;" id="caseFieldsBox"></div>
+          <button class="btn-primary" onclick="saveCaseFields()">Сохранить данные</button>
+          <button class="btn-primary" onclick="generateDocuments()" style="margin-left:8px;">Сгенерировать документы</button>
+          <div class="login-error" id="caseFormError" style="margin-top:10px;"></div>
+        </div>
+
+        <div id="caseDocsBox" style="display:none;">
+          <h2 style="font-size:15px;margin:26px 0 10px;">Готовые документы</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Документ</th><th>Создан</th><th></th></tr></thead>
+              <tbody id="caseDocsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
 
       <!-- ===== ЮРИСТ: СПИСОК ШАБЛОНОВ ===== -->
       <div class="screen" id="screen-lawyer-templates">

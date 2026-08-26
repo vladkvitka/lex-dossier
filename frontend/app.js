@@ -13,6 +13,7 @@ let state = {
   categories: [],
   templates: [],
   cases: [],
+  packages: [],
 };
 
 // Направления дел — по данным из prototype.html (data-branch="civil_admin"/"svo").
@@ -116,6 +117,7 @@ async function enterApp(){
     await loadCategories();
     await loadTemplates();
     await loadCasesList();
+    await loadAllPackages();
     switchNav('admin-categories', document.querySelector('[data-nav=admin-categories]'));
   } else {
     document.getElementById('nav-lawyer').style.display = 'block';
@@ -327,25 +329,167 @@ async function publishTemplate(id){
   }
 }
 
+let currentFieldsTemplateId = null;
+
+const FIELD_TYPES = [
+  { value: 'text', label: 'Текст (в одну строку)' },
+  { value: 'textarea', label: 'Текст (многострочный)' },
+  { value: 'date', label: 'Дата' },
+  { value: 'number', label: 'Число' },
+  { value: 'money', label: 'Денежная сумма' },
+  { value: 'select', label: 'Выбор из списка' },
+];
+
 async function openTemplateFields(id){
   try {
     const tmpl = await api(`/templates/${id}`);
+    currentFieldsTemplateId = id;
     document.getElementById('feTitle').textContent = 'Поля шаблона: ' + tmpl.name;
-    const fields = tmpl.fields || [];
-    const body = document.getElementById('feTableBody');
-    body.innerHTML = fields.length
-      ? fields.map(f => `
-          <tr>
-            <td class="fe-key">{{${escapeHtml(f.field_key)}}}</td>
-            <td>${escapeHtml(f.label)}</td>
-            <td>${escapeHtml(f.field_type)}</td>
-            <td style="text-align:center;">${f.is_required ? '✓' : '—'}</td>
-            <td style="text-align:center;">${f.is_shared ? '✓' : '—'}</td>
-          </tr>`).join('')
-      : '<tr><td colspan="5" style="color:var(--muted);">Поля не найдены</td></tr>';
+    renderFieldsForm(tmpl.fields || []);
     switchNav('admin-fields', null);
   } catch (err){
     toast('Ошибка: ' + err.message);
+  }
+}
+
+function renderFieldsForm(fields){
+  const box = document.getElementById('feFormBox');
+  if (!fields.length){
+    box.innerHTML = '<div style="color:var(--muted);">В этом документе не найдено плейсхолдеров</div>';
+    return;
+  }
+  box.innerHTML = fields.map(f => `
+    <div class="upload-zone" style="max-width:720px;margin-bottom:12px;" data-field-row="${f.id}">
+      <div style="font-family:var(--font-mono);font-size:12px;color:var(--navy);margin-bottom:10px;">{{${escapeHtml(f.field_key)}}}</div>
+      <div class="field">
+        <label>Название поля (видит юрист в форме)</label>
+        <input data-fe="label" value="${escapeHtml(f.label)}">
+      </div>
+      <div class="field">
+        <label>Тип поля</label>
+        <select data-fe="field_type">
+          ${FIELD_TYPES.map(t => `<option value="${t.value}" ${t.value===f.field_type?'selected':''}>${t.label}</option>`).join('')}
+        </select>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px;">
+        <input type="checkbox" data-fe="is_required" ${f.is_required ? 'checked' : ''}> Обязательное поле
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px;">
+        <input type="checkbox" data-fe="is_shared" ${f.is_shared ? 'checked' : ''} onchange="onSharedToggle(this)"> Общее для пакета (одно значение для нескольких документов)
+      </label>
+      <div class="field" data-shared-key-field style="display:${f.is_shared ? 'block' : 'none'};margin-bottom:0;">
+        <label>Ключ группировки общего поля</label>
+        <input data-fe="shared_group_key" value="${escapeHtml(f.shared_group_key || '')}" placeholder="например: фио_доверителя">
+      </div>
+    </div>`).join('');
+}
+
+function onSharedToggle(checkbox){
+  const row = checkbox.closest('[data-field-row]');
+  const keyField = row.querySelector('[data-shared-key-field]');
+  keyField.style.display = checkbox.checked ? 'block' : 'none';
+}
+
+async function saveTemplateFields(){
+  const errBox = document.getElementById('feError');
+  errBox.style.display = 'none';
+  const rows = document.querySelectorAll('#feFormBox [data-field-row]');
+  const fields = Array.from(rows).map(row => {
+    const isShared = row.querySelector('[data-fe=is_shared]').checked;
+    return {
+      id: row.getAttribute('data-field-row'),
+      label: row.querySelector('[data-fe=label]').value.trim(),
+      field_type: row.querySelector('[data-fe=field_type]').value,
+      is_required: row.querySelector('[data-fe=is_required]').checked,
+      is_shared: isShared,
+      shared_group_key: isShared ? (row.querySelector('[data-fe=shared_group_key]').value.trim() || null) : null,
+    };
+  });
+  try {
+    const tmpl = await api(`/templates/${currentFieldsTemplateId}/fields`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ fields })
+    });
+    renderFieldsForm(tmpl.fields || []);
+    toast('Карта полей сохранена');
+  } catch (err){
+    errBox.textContent = 'Ошибка сохранения: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
+// ---------- пакеты ----------
+
+async function loadAllPackages(){
+  state.packages = await api('/packages');
+  renderAdminPackagesTable();
+}
+
+function renderAdminPackagesTable(){
+  const body = document.getElementById('adminPkgBody');
+  if (!body) return;
+  if (!state.packages.length){
+    body.innerHTML = '<tr><td colspan="3" style="color:var(--muted);">Пакетов пока нет</td></tr>';
+    return;
+  }
+  body.innerHTML = state.packages.map(p => `
+    <tr>
+      <td>${escapeHtml(p.name)}</td>
+      <td>${escapeHtml(categoryName(p.category_id))}</td>
+      <td>${p.items.length}</td>
+    </tr>`).join('');
+}
+
+function onPkgCategoryChange(){
+  const catId = document.getElementById('newPkgCategory').value;
+  const box = document.getElementById('newPkgTemplates');
+  if (!catId){
+    box.innerHTML = '<div style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>';
+    return;
+  }
+  const inCategory = state.templates.filter(t => t.category_id === catId);
+  if (!inCategory.length){
+    box.innerHTML = '<div style="color:var(--muted);font-size:13px;">В этой категории пока нет шаблонов</div>';
+    return;
+  }
+  box.innerHTML = inCategory.map(t => `
+    <label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;">
+      <input type="checkbox" value="${t.id}" data-pkg-tmpl> ${escapeHtml(t.name)}
+      ${t.status !== 'published' ? '<span class="badge badge-draft" style="margin-left:6px;">черновик</span>' : ''}
+    </label>`).join('');
+}
+
+async function createPackage(){
+  const name = document.getElementById('newPkgName').value.trim();
+  const categoryId = document.getElementById('newPkgCategory').value;
+  const templateIds = Array.from(document.querySelectorAll('#newPkgTemplates [data-pkg-tmpl]:checked')).map(el => el.value);
+  const errBox = document.getElementById('newPkgError');
+  errBox.style.display = 'none';
+
+  if (!name || !categoryId || !templateIds.length){
+    errBox.textContent = 'Укажите название, категорию и выберите хотя бы один шаблон';
+    errBox.style.display = 'block';
+    return;
+  }
+  const btn = document.getElementById('createPkgBtn');
+  btn.disabled = true;
+  try {
+    await api('/packages', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name, category_id: categoryId, template_ids: templateIds })
+    });
+    document.getElementById('newPkgName').value = '';
+    document.getElementById('newPkgCategory').value = '';
+    document.getElementById('newPkgTemplates').innerHTML = '<div style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>';
+    toast('Пакет создан');
+    await loadAllPackages();
+  } catch (err){
+    errBox.textContent = 'Ошибка: ' + err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
   }
 }
 
@@ -388,9 +532,33 @@ async function openNewCaseForm(){
   switchNav('case-new', null);
 }
 
+async function onNewCaseCategoryChange(){
+  const catId = document.getElementById('newCaseCategory').value;
+  const pkgField = document.getElementById('newCasePackageField');
+  const pkgSelect = document.getElementById('newCasePackage');
+  if (!catId){
+    pkgField.style.display = 'none';
+    return;
+  }
+  try {
+    const packages = await api(`/packages?category_id=${catId}`);
+    if (!packages.length){
+      pkgField.style.display = 'none';
+      pkgSelect.innerHTML = '<option value="">— без пакета, выберу документы вручную —</option>';
+      return;
+    }
+    pkgSelect.innerHTML = '<option value="">— без пакета, выберу документы вручную —</option>' +
+      packages.map(p => `<option value="${p.id}">${escapeHtml(p.name)} (${p.items.length} док.)</option>`).join('');
+    pkgField.style.display = 'block';
+  } catch (err){
+    toast('Ошибка загрузки пакетов: ' + err.message);
+  }
+}
+
 async function createCase(){
   const client = document.getElementById('newCaseClient').value.trim();
   const categoryId = document.getElementById('newCaseCategory').value;
+  const packageId = document.getElementById('newCasePackage').value || null;
   const errBox = document.getElementById('newCaseError');
   errBox.style.display = 'none';
 
@@ -405,10 +573,11 @@ async function createCase(){
     const newCase = await api('/cases', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ category_id: categoryId, client_name: client })
+      body: JSON.stringify({ category_id: categoryId, client_name: client, package_id: packageId })
     });
     document.getElementById('newCaseClient').value = '';
     document.getElementById('newCaseCategory').value = '';
+    document.getElementById('newCasePackageField').style.display = 'none';
     await loadCasesList();
     await openCase(newCase.id);
   } catch (err){
@@ -423,6 +592,18 @@ async function openCase(caseId){
   try {
     currentCase = await api(`/cases/${caseId}`);
     currentCaseSelectedTemplates = new Set(currentCase.documents.map(d => d.template_id));
+
+    // Если у дела есть пакет и документы ещё не генерировались —
+    // сразу отмечаем шаблоны из пакета, чтобы не выбирать их вручную.
+    if (currentCase.package_id && !currentCaseSelectedTemplates.size){
+      try {
+        const packages = await api(`/packages?category_id=${currentCase.category_id}`);
+        const pkg = packages.find(p => p.id === currentCase.package_id);
+        if (pkg){
+          pkg.items.forEach(item => currentCaseSelectedTemplates.add(item.template_id));
+        }
+      } catch (e) { /* не критично — просто не предвыберем */ }
+    }
 
     document.getElementById('caseTitle').textContent = currentCase.client_name;
     document.getElementById('caseSub').textContent =
@@ -475,28 +656,31 @@ async function renderCaseFieldsForm(available){
   }
   formBox.style.display = 'block';
 
-  // Собираем объединённый список полей по всем выбранным шаблонам,
-  // без дублей по field_key (одинаковый ключ = одно поле формы дела).
+  // Собираем объединённый список полей по всем выбранным шаблонам.
+  // Ключ объединения: shared_group_key, если поле общее и он задан,
+  // иначе — обычный field_key. Так одинаковые по смыслу поля разных
+  // документов (например «ФИО доверителя») превращаются в одно поле формы.
   const selected = available.filter(t => currentCaseSelectedTemplates.has(t.id));
-  const fieldsByKey = new Map();
+  const fieldsByGroupKey = new Map();
   for (const t of selected){
     const detail = await api(`/templates/${t.id}`);
     for (const f of detail.fields){
-      if (!fieldsByKey.has(f.field_key)) fieldsByKey.set(f.field_key, f);
+      const groupKey = (f.is_shared && f.shared_group_key) ? f.shared_group_key : f.field_key;
+      if (!fieldsByGroupKey.has(groupKey)) fieldsByGroupKey.set(groupKey, f);
     }
   }
 
   const existingValues = {};
   (currentCase.fields || []).forEach(f => { existingValues[f.field_key] = f.value; });
 
-  const rows = Array.from(fieldsByKey.values());
+  const rows = Array.from(fieldsByGroupKey.entries());
   fieldsBox.innerHTML = rows.length
-    ? rows.map(f => `
+    ? rows.map(([groupKey, f]) => `
         <div class="field">
-          <label>${escapeHtml(f.label)}${f.is_required ? ' *' : ''}</label>
+          <label>${escapeHtml(f.label)}${f.is_required ? ' *' : ''}${f.is_shared ? ' <span style="color:var(--muted);font-weight:400;">(общее)</span>' : ''}</label>
           ${f.field_type === 'textarea'
-            ? `<textarea rows="3" data-field-key="${escapeHtml(f.field_key)}">${escapeHtml(existingValues[f.field_key] || '')}</textarea>`
-            : `<input data-field-key="${escapeHtml(f.field_key)}" value="${escapeHtml(existingValues[f.field_key] || '')}">`}
+            ? `<textarea rows="3" data-field-key="${escapeHtml(groupKey)}">${escapeHtml(existingValues[groupKey] || '')}</textarea>`
+            : `<input data-field-key="${escapeHtml(groupKey)}" value="${escapeHtml(existingValues[groupKey] || '')}">`}
         </div>`).join('')
     : '<div style="color:var(--muted);">В выбранных документах не найдено полей</div>';
 }

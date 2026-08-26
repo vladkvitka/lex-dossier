@@ -64,6 +64,7 @@
         <div class="sidenav-label">Управление</div>
         <button class="nav-item active" data-nav="admin-categories" onclick="switchNav('admin-categories', this)">Категории</button>
         <button class="nav-item" data-nav="admin-templates" onclick="switchNav('admin-templates', this)">Шаблоны</button>
+        <button class="nav-item" data-nav="admin-packages" onclick="switchNav('admin-packages', this)">Пакеты</button>
       </div>
     </div>
 
@@ -94,7 +95,13 @@
           </div>
           <div class="field">
             <label>Категория</label>
-            <select id="newCaseCategory"><option value="">— выберите категорию —</option></select>
+            <select id="newCaseCategory" onchange="onNewCaseCategoryChange()"><option value="">— выберите категорию —</option></select>
+          </div>
+          <div class="field" id="newCasePackageField" style="display:none;">
+            <label>Пакет документов (необязательно)</label>
+            <select id="newCasePackage">
+              <option value="">— без пакета, выберу документы вручную —</option>
+            </select>
           </div>
           <button class="btn-primary" id="createCaseBtn" onclick="createCase()">Создать дело</button>
           <div class="login-error" id="newCaseError" style="margin-top:10px;"></div>
@@ -208,12 +215,39 @@
       <!-- ===== АДМИН: ПОЛЯ ШАБЛОНА ===== -->
       <div class="screen" id="screen-admin-fields">
         <h1 class="page-title" id="feTitle">Поля шаблона</h1>
-        <p class="page-sub">Плейсхолдеры, найденные внутри документа при загрузке</p>
+        <p class="page-sub">Отметьте, какие поля общие для пакета документов (is_shared), и при необходимости укажите общий ключ группировки — это позволит одному значению подставляться сразу в несколько документов дела</p>
         <button class="btn" style="margin-bottom:16px;" onclick="switchNav('admin-templates', document.querySelector('[data-nav=admin-templates]'))">← К шаблонам</button>
+        <div id="feFormBox"></div>
+        <button class="btn-primary" style="margin-top:14px;" onclick="saveTemplateFields()">Сохранить карту полей</button>
+        <div class="login-error" id="feError" style="margin-top:10px;"></div>
+      </div>
+
+      <!-- ===== АДМИН: ПАКЕТЫ ===== -->
+      <div class="screen" id="screen-admin-packages">
+        <h1 class="page-title">Пакеты документов</h1>
+        <p class="page-sub">Наборы шаблонов, которые обычно генерируются вместе для одной категории дел</p>
+
+        <div class="upload-zone">
+          <div class="field">
+            <label>Название пакета</label>
+            <input id="newPkgName" placeholder="Например: Увольнение со службы по состоянию здоровья">
+          </div>
+          <div class="field">
+            <label>Категория</label>
+            <select id="newPkgCategory" onchange="onPkgCategoryChange()"><option value="">— выберите категорию —</option></select>
+          </div>
+          <div class="field">
+            <label>Шаблоны в пакете</label>
+            <div id="newPkgTemplates" style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>
+          </div>
+          <button class="btn-primary" id="createPkgBtn" onclick="createPackage()">Создать пакет</button>
+          <div class="login-error" id="newPkgError" style="margin-top:10px;"></div>
+        </div>
+
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Плейсхолдер</th><th>Название поля</th><th>Тип</th><th>Обязательное</th><th>Общее для пакета</th></tr></thead>
-            <tbody id="feTableBody"></tbody>
+            <thead><tr><th>Название</th><th>Категория</th><th>Документов в пакете</th></tr></thead>
+            <tbody id="adminPkgBody"></tbody>
           </table>
         </div>
       </div>
@@ -224,6 +258,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=2"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>

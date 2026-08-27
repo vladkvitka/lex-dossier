@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import shutil
 import subprocess
 import tempfile
@@ -12,7 +13,6 @@ from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from docxtpl import DocxTemplate
-import mammoth
 from docx import Document as DocxDocument
 
 from database import Base, engine, get_db
@@ -41,6 +41,7 @@ from schemas import (
     GenerateRequest,
     PreviewRequest,
     PreviewResponse,
+    CaseDocumentEditRequest,
 )
 from security import verify_password, create_access_token
 from deps import get_current_user, require_admin
@@ -686,6 +687,7 @@ def delete_case(
                     pass
 
     db.query(models.CaseDocument).filter(models.CaseDocument.case_id == case_id).delete()
+    db.query(models.CaseDocumentEdit).filter(models.CaseDocumentEdit.case_id == case_id).delete()
     db.query(models.CaseFieldValue).filter(models.CaseFieldValue.case_id == case_id).delete()
     db.delete(case)
     db.commit()
@@ -806,6 +808,57 @@ def _build_document_filename(client_name: str, template_name: str, ext: str) -> 
     return _sanitize_filename(f"{_format_client_short_name(client_name)} {template_name}") + "." + ext
 
 
+def _extract_paragraph_texts(docx_path: str) -> List[str]:
+    """Текст абзацев основного тела документа (без таблиц, колонтитулов —
+    для них редактирование текста пока не поддерживается)."""
+    doc = DocxDocument(docx_path)
+    return [p.text for p in doc.paragraphs]
+
+
+def _apply_paragraph_texts(docx_path: str, texts: List[str]):
+    """Записывает текст абзацев обратно в реальный .docx, стараясь сохранить
+    форматирование (шрифт нормализуется отдельным шагом после). Если абзацев
+    в правках больше, чем было в документе — лишние добавляются в конец по
+    образцу последнего абзаца. Если меньше — оставшиеся исходные очищаются."""
+    doc = DocxDocument(docx_path)
+    paragraphs = doc.paragraphs
+    n_original = len(paragraphs)
+    n_new = len(texts)
+
+    for i in range(min(n_original, n_new)):
+        p = paragraphs[i]
+        if p.runs:
+            p.runs[0].text = texts[i]
+            for extra in p.runs[1:]:
+                extra.text = ""
+        else:
+            p.add_run(texts[i])
+
+    for i in range(n_new, n_original):
+        for run in paragraphs[i].runs:
+            run.text = ""
+
+    if n_new > n_original and n_original > 0:
+        last_p = paragraphs[-1]
+        for i in range(n_original, n_new):
+            new_p = doc.add_paragraph()
+            new_p.paragraph_format.alignment = last_p.paragraph_format.alignment
+            run = new_p.add_run(texts[i])
+            if last_p.runs:
+                run.bold = last_p.runs[0].bold
+                run.italic = last_p.runs[0].italic
+
+    doc.save(docx_path)
+
+
+def _get_manual_edit(db: Session, case_id: uuid.UUID, template_id: uuid.UUID):
+    return (
+        db.query(models.CaseDocumentEdit)
+        .filter(models.CaseDocumentEdit.case_id == case_id, models.CaseDocumentEdit.template_id == template_id)
+        .first()
+    )
+
+
 @app.post("/api/cases/{case_id}/generate", response_model=List[CaseDocumentOut])
 def generate_documents(
     case_id: uuid.UUID,
@@ -861,6 +914,16 @@ def generate_documents(
                 detail=f"Не удалось сформировать документ по шаблону «{template.name}»: {e}",
             )
 
+        # Если по этому документу есть ручные правки текста (внесённые в
+        # предпросмотре) — накладываем их поверх обычной подстановки полей.
+        manual_edit = _get_manual_edit(db, case_id, template_id)
+        if manual_edit:
+            try:
+                texts = json.loads(manual_edit.paragraphs_json)
+                _apply_paragraph_texts(docx_path, texts)
+            except Exception:
+                pass  # если что-то пошло не так — остаётся вариант с подставленными полями
+
         _normalize_font(docx_path)
 
         pdf_path = _convert_to_pdf(docx_path, case_dir)
@@ -897,9 +960,12 @@ def preview_document(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Живой предпросмотр документа по текущим (возможно ещё не сохранённым)
-    значениям формы — ничего не пишет в базу и не создаёт файлов в хранилище,
-    только временный файл для конвертации в HTML."""
+    """Предпросмотр документа по абзацам. Если по этому документу уже
+    сохранены ручные правки текста — показывает их (это и есть «текущее
+    состояние» документа). Иначе строит абзацы заново по текущим значениям
+    формы (возможно ещё не сохранённым), подставляя метку-пропуск вместо
+    пустых полей. Ничего не пишет в базу и не создаёт файлов в хранилище,
+    кроме одного временного файла для чтения абзацев."""
     case = db.query(models.Case).filter(models.Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Дело не найдено")
@@ -910,6 +976,10 @@ def preview_document(
     if current_user.role != "admin" and template.status != "published":
         raise HTTPException(status_code=403, detail="Шаблон недоступен")
 
+    manual_edit = _get_manual_edit(db, case_id, data.template_id)
+    if manual_edit:
+        return PreviewResponse(paragraphs=json.loads(manual_edit.paragraphs_json), has_manual_edit=True)
+
     template_fields = (
         db.query(models.TemplateField)
         .filter(models.TemplateField.template_id == data.template_id)
@@ -919,10 +989,9 @@ def preview_document(
     for f in template_fields:
         lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
         value = data.values.get(lookup_key)
-        # В отличие от финальной генерации, в предпросмотре пустое поле
-        # помечаем служебной меткой — фронтенд подсвечивает её как «пропуск»
-        # (аналог подсветки незаполненных полей в прототипе). В реальный
-        # сохранённый .docx такая метка никогда не попадает.
+        # Пустое поле помечаем служебной меткой — фронтенд подсвечивает её
+        # как «пропуск» (аналог подсветки незаполненных полей в прототипе).
+        # В реальный сохранённый .docx такая метка никогда не попадает.
         context[f.field_key] = value if value else f"⟦не заполнено: {f.label}⟧"
 
     tmp_path = None
@@ -932,16 +1001,59 @@ def preview_document(
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             tmp_path = tmp.name
         doc.save(tmp_path)
-        with open(tmp_path, "rb") as f:
-            result = mammoth.convert_to_html(f)
-        html = result.value
+        paragraphs = _extract_paragraph_texts(tmp_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Не удалось построить предпросмотр: {e}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    return PreviewResponse(html=html)
+    return PreviewResponse(paragraphs=paragraphs, has_manual_edit=False)
+
+
+@app.put("/api/cases/{case_id}/documents/edit", response_model=PreviewResponse)
+def save_document_edit(
+    case_id: uuid.UUID,
+    data: CaseDocumentEditRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Сохраняет ручную правку текста документа. Учитывается при следующей
+    генерации этого документа (накладывается поверх подстановки полей)."""
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    existing = _get_manual_edit(db, case_id, data.template_id)
+    paragraphs_json = json.dumps(data.paragraphs, ensure_ascii=False)
+    if existing:
+        existing.paragraphs_json = paragraphs_json
+    else:
+        db.add(models.CaseDocumentEdit(
+            id=uuid.uuid4(),
+            case_id=case_id,
+            template_id=data.template_id,
+            paragraphs_json=paragraphs_json,
+        ))
+    db.commit()
+    return PreviewResponse(paragraphs=data.paragraphs, has_manual_edit=True)
+
+
+@app.delete("/api/cases/{case_id}/documents/edit")
+def discard_document_edit(
+    case_id: uuid.UUID,
+    template_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Отменяет ручные правки — при следующем открытии документ снова
+    будет собираться из значений формы."""
+    db.query(models.CaseDocumentEdit).filter(
+        models.CaseDocumentEdit.case_id == case_id,
+        models.CaseDocumentEdit.template_id == template_id,
+    ).delete()
+    db.commit()
+    return {"status": "ok"}
 
 
 @app.get("/api/cases/{case_id}/documents/{document_id}/download")

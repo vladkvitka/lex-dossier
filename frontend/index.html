@@ -50,7 +50,6 @@
       <div class="sidenav-section">
         <div class="sidenav-label">Рабочее пространство</div>
         <button class="nav-item active" data-nav="cases-list" onclick="switchNav('cases-list', this)">Дела</button>
-        <button class="nav-item" data-nav="lawyer-templates" onclick="switchNav('lawyer-templates', this)">Шаблоны документов</button>
       </div>
     </div>
 
@@ -77,7 +76,7 @@
         <button class="btn-primary" style="margin-bottom:16px;" onclick="openNewCaseForm()">+ Новое дело</button>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Клиент</th><th>Категория</th><th>Статус</th><th>Создано</th><th></th></tr></thead>
+            <thead><tr><th>Клиент</th><th>Категория</th><th>Автор</th><th>Статус</th><th>Создано</th><th></th></tr></thead>
             <tbody id="casesListBody"></tbody>
           </table>
         </div>
@@ -112,41 +111,52 @@
       <div class="screen" id="screen-case-detail">
         <h1 class="page-title" id="caseTitle">Дело</h1>
         <p class="page-sub" id="caseSub"></p>
-        <button class="btn" style="margin-bottom:16px;" onclick="switchNav('cases-list', null)">← К списку дел</button>
-
-        <div class="notice">1. Выберите документы → 2. Заполните форму → 3. Сгенерируйте и скачайте</div>
-
-        <h2 style="font-size:15px;margin:22px 0 10px;">Документы для этого дела</h2>
-        <div id="caseTemplatesBox" class="upload-zone" style="max-width:640px;"></div>
-
-        <div id="caseFormBox" style="display:none;">
-          <h2 style="font-size:15px;margin:26px 0 10px;">Данные дела</h2>
-          <div class="upload-zone" style="max-width:640px;" id="caseFieldsBox"></div>
-          <button class="btn-primary" onclick="saveCaseFields()">Сохранить данные</button>
-          <button class="btn-primary" onclick="generateDocuments()" style="margin-left:8px;">Сгенерировать документы</button>
-          <div class="login-error" id="caseFormError" style="margin-top:10px;"></div>
+        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
+          <button class="btn" onclick="switchNav('cases-list', null)">← К списку дел</button>
+          <button class="btn" onclick="renameCurrentCase()">Переименовать</button>
+          <button class="btn" style="color:var(--wine);" onclick="deleteCurrentCase()">Удалить дело</button>
         </div>
 
-        <div id="caseDocsBox" style="display:none;">
-          <h2 style="font-size:15px;margin:26px 0 10px;">Готовые документы</h2>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Документ</th><th>Создан</th><th></th></tr></thead>
-              <tbody id="caseDocsBody"></tbody>
-            </table>
+        <div class="notice">1. Выберите документы → 2. Заполните форму (предпросмотр справа обновится сам) → 3. Сгенерируйте и скачайте</div>
+
+        <div class="case-columns">
+          <div>
+            <h2 style="font-size:15px;margin:0 0 10px;">Документы для этого дела</h2>
+            <div id="caseTemplatesBox" class="upload-zone"></div>
+
+            <div id="caseFormBox" style="display:none;">
+              <h2 style="font-size:15px;margin:26px 0 10px;">Данные дела</h2>
+              <div class="upload-zone" id="caseFieldsBox"></div>
+              <button class="btn-primary" onclick="saveCaseFields()">Сохранить данные</button>
+              <button class="btn-primary" onclick="generateDocuments()" style="margin-left:8px;">Сгенерировать документы</button>
+              <div class="login-error" id="caseFormError" style="margin-top:10px;"></div>
+            </div>
+
+            <div id="caseDocsBox" style="display:none;">
+              <h2 style="font-size:15px;margin:26px 0 10px;">Готовые документы</h2>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Документ</th><th>Создан</th><th></th></tr></thead>
+                  <tbody id="caseDocsBody"></tbody>
+                </table>
+              </div>
+              <button class="btn-primary" style="margin-top:12px;" onclick="downloadAllCaseDocuments()">Скачать весь пакет (.zip)</button>
+            </div>
           </div>
-        </div>
-      </div>
 
-      <!-- ===== ЮРИСТ: СПИСОК ШАБЛОНОВ ===== -->
-      <div class="screen" id="screen-lawyer-templates">
-        <h1 class="page-title">Шаблоны документов</h1>
-        <p class="page-sub">Опубликованные шаблоны, доступные для работы</p>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Название</th><th>Категория</th><th></th></tr></thead>
-            <tbody id="lawyerTmplBody"></tbody>
-          </table>
+          <div>
+            <div class="doc-tabs" id="docTabs"></div>
+            <div class="doc-preview-panel">
+              <div class="doc-preview-head">
+                <div class="dt" id="docPreviewTitle">—</div>
+                <div class="doc-actions">
+                  <button class="btn btn-sm" onclick="downloadActiveTabDoc('docx')">Скачать .docx</button>
+                  <button class="btn btn-sm" onclick="downloadActiveTabDoc('pdf')">Скачать .pdf</button>
+                </div>
+              </div>
+              <div class="doc-body" id="docBody"><div class="doc-body-empty">Отметьте документ слева, чтобы увидеть предпросмотр</div></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -218,7 +228,10 @@
         <p class="page-sub">Отметьте, какие поля общие для пакета документов (is_shared), и при необходимости укажите общий ключ группировки — это позволит одному значению подставляться сразу в несколько документов дела</p>
         <button class="btn" style="margin-bottom:16px;" onclick="switchNav('admin-templates', document.querySelector('[data-nav=admin-templates]'))">← К шаблонам</button>
         <div id="feFormBox"></div>
-        <button class="btn-primary" style="margin-top:14px;" onclick="saveTemplateFields()">Сохранить карту полей</button>
+        <div style="display:flex;gap:8px;margin-top:14px;">
+          <button class="btn-primary" onclick="saveTemplateFields()">Сохранить карту полей</button>
+          <button class="btn" onclick="addTemplateFieldPrompt()">+ Добавить поле вручную</button>
+        </div>
         <div class="login-error" id="feError" style="margin-top:10px;"></div>
       </div>
 
@@ -240,13 +253,16 @@
             <label>Шаблоны в пакете</label>
             <div id="newPkgTemplates" style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>
           </div>
-          <button class="btn-primary" id="createPkgBtn" onclick="createPackage()">Создать пакет</button>
+          <div style="display:flex;gap:8px;">
+            <button class="btn-primary" id="createPkgBtn" onclick="savePackage()">Создать пакет</button>
+            <button class="btn" id="cancelPkgEditBtn" style="display:none;" onclick="resetPackageForm()">Отменить редактирование</button>
+          </div>
           <div class="login-error" id="newPkgError" style="margin-top:10px;"></div>
         </div>
 
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Название</th><th>Категория</th><th>Документов в пакете</th></tr></thead>
+            <thead><tr><th>Название</th><th>Категория</th><th>Документов в пакете</th><th></th></tr></thead>
             <tbody id="adminPkgBody"></tbody>
           </table>
         </div>
@@ -258,6 +274,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>

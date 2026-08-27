@@ -297,9 +297,24 @@ function renderAdminTemplates(){
         <td style="text-align:right;white-space:nowrap;">
           <button class="btn btn-sm" onclick="openTemplateFields('${t.id}')">Поля</button>
           ${published ? '' : `<button class="btn-primary btn-sm" onclick="publishTemplate('${t.id}')">Опубликовать</button>`}
+          <button class="btn btn-sm" style="color:var(--wine);" onclick="deleteTemplateConfirm('${t.id}')">Удалить</button>
         </td>
       </tr>`;
   }).join('');
+}
+
+async function deleteTemplateConfirm(templateId){
+  const tmpl = state.templates.find(t => t.id === templateId);
+  if (!tmpl) return;
+  const ok = window.confirm(`Удалить шаблон «${tmpl.name}»? Это можно сделать, только если он не используется в пакетах и по нему ещё не генерировались документы.`);
+  if (!ok) return;
+  try {
+    await api(`/templates/${templateId}`, { method: 'DELETE' });
+    toast('Шаблон удалён');
+    await loadTemplates();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
 }
 
 function renderLawyerTemplates(){
@@ -1124,9 +1139,9 @@ async function downloadAllCaseDocuments(){
 
 function filenameFromResponse(res, fallback){
   const cd = res.headers.get('Content-Disposition') || '';
-  let match = cd.match(/filename\*=UTF-8''([^;]+)/);
+  let match = cd.match(/filename\*=UTF-8''([^;]+)/i);
   if (match) { try { return decodeURIComponent(match[1]); } catch(e) {} }
-  match = cd.match(/filename="?([^";]+)"?/);
+  match = cd.match(/filename="?([^";]+)"?/i);
   if (match) return match[1];
   return fallback;
 }

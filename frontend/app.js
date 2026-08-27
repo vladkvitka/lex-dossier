@@ -873,10 +873,13 @@ async function saveCaseFields(){
   }
 }
 
-// ---------- предпросмотр документа (вкладки + живой рендер) ----------
+// ---------- предпросмотр документа (вкладки + просмотр/редактирование) ----------
 
 let currentDocTabId = null;
 let previewDebounceTimer = null;
+let isEditingDoc = false;
+let lastPreviewParagraphs = [];   // текущие абзацы активной вкладки (как пришли с сервера)
+let lastPreviewHasManualEdit = false;
 
 function renderCaseDocTabs(available){
   const tabsBox = document.getElementById('docTabs');
@@ -886,6 +889,7 @@ function renderCaseDocTabs(available){
     tabsBox.innerHTML = '';
     document.getElementById('docPreviewTitle').textContent = '—';
     document.getElementById('docBody').innerHTML = '<div class="doc-body-empty">Отметьте документ слева, чтобы увидеть предпросмотр</div>';
+    setEditModeUI(false);
     currentDocTabId = null;
     return;
   }
@@ -899,25 +903,39 @@ function renderCaseDocTabs(available){
       <span class="dot"></span>${escapeHtml(t.name)}
     </div>`).join('');
 
+  isEditingDoc = false;
   refreshPreview();
 }
 
 function selectDocTab(templateId){
+  if (isEditingDoc){
+    const ok = window.confirm('Несохранённые правки этого документа будут потеряны. Переключиться на другой документ?');
+    if (!ok) return;
+  }
   currentDocTabId = templateId;
+  isEditingDoc = false;
   document.querySelectorAll('.doc-tab').forEach(el => el.classList.toggle('active', el.dataset.doc === templateId));
   refreshPreview();
 }
 
 function scheduleRefreshPreview(){
+  if (isEditingDoc) return; // пока правим текст руками — не затираем правки живым рендером по полям
   clearTimeout(previewDebounceTimer);
   previewDebounceTimer = setTimeout(refreshPreview, 500);
 }
 
-function highlightGaps(html){
+function highlightGaps(text){
   // Сервер вставляет служебные метки вида ⟦не заполнено: label⟧ вместо
   // пустых значений в предпросмотре — оборачиваем их в заметный стиль,
   // как «пропуски» в прототипе. В итоговом скачанном файле таких меток нет.
-  return html.replace(/⟦([^⟧]*)⟧/g, '<span class="gap">$1</span>');
+  return escapeHtml(text).replace(/⟦([^⟧]*)⟧/g, '<span class="gap">$1</span>');
+}
+
+function renderDocBodyReadOnly(paragraphs){
+  const docBody = document.getElementById('docBody');
+  docBody.innerHTML = paragraphs.length
+    ? paragraphs.map(p => `<p>${p.trim() ? highlightGaps(p) : '&nbsp;'}</p>`).join('')
+    : '<div class="doc-body-empty">В документе не найдено текстовых абзацев</div>';
 }
 
 async function refreshPreview(){
@@ -936,9 +954,78 @@ async function refreshPreview(){
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ template_id: currentDocTabId, values })
     });
-    docBody.innerHTML = highlightGaps(result.html);
+    lastPreviewParagraphs = result.paragraphs;
+    lastPreviewHasManualEdit = result.has_manual_edit;
+    renderDocBodyReadOnly(lastPreviewParagraphs);
+    setEditModeUI(false, lastPreviewHasManualEdit);
   } catch (err){
     docBody.innerHTML = `<div class="doc-body-empty">Не удалось построить предпросмотр: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function setEditModeUI(editing, hasManualEdit){
+  const editBtn = document.getElementById('docEditBtn');
+  const saveBtn = document.getElementById('docSaveEditBtn');
+  const cancelBtn = document.getElementById('docCancelEditBtn');
+  const resetBtn = document.getElementById('docResetEditBtn');
+  if (!editBtn) return;
+  editBtn.style.display = editing ? 'none' : 'inline-flex';
+  saveBtn.style.display = editing ? 'inline-flex' : 'none';
+  cancelBtn.style.display = editing ? 'inline-flex' : 'none';
+  resetBtn.style.display = (!editing && hasManualEdit) ? 'inline-flex' : 'none';
+}
+
+function startEditDoc(){
+  if (!currentDocTabId) return;
+  isEditingDoc = true;
+  const docBody = document.getElementById('docBody');
+  const textarea = document.createElement('textarea');
+  textarea.id = 'docEditTextarea';
+  textarea.style.cssText = 'width:100%;min-height:360px;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-display);font-size:14.5px;line-height:1.7;resize:vertical;';
+  textarea.value = lastPreviewParagraphs.join('\n');
+  docBody.innerHTML = '';
+  docBody.appendChild(textarea);
+  setEditModeUI(true);
+  textarea.focus();
+}
+
+function cancelEditDoc(){
+  isEditingDoc = false;
+  renderDocBodyReadOnly(lastPreviewParagraphs);
+  setEditModeUI(false, lastPreviewHasManualEdit);
+}
+
+async function saveEditDoc(){
+  const textarea = document.getElementById('docEditTextarea');
+  if (!textarea) return;
+  const paragraphs = textarea.value.split('\n');
+  try {
+    const result = await api(`/cases/${currentCase.id}/documents/edit`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ template_id: currentDocTabId, paragraphs })
+    });
+    lastPreviewParagraphs = result.paragraphs;
+    lastPreviewHasManualEdit = result.has_manual_edit;
+    isEditingDoc = false;
+    renderDocBodyReadOnly(lastPreviewParagraphs);
+    setEditModeUI(false, true);
+    toast('Правки сохранены — учтутся при генерации документа');
+  } catch (err){
+    toast('Ошибка сохранения правок: ' + err.message);
+  }
+}
+
+async function resetEditDoc(){
+  if (!currentDocTabId || !currentCase) return;
+  const ok = window.confirm('Отменить ручные правки текста и вернуться к автоматической подстановке полей?');
+  if (!ok) return;
+  try {
+    await api(`/cases/${currentCase.id}/documents/edit?template_id=${currentDocTabId}`, { method: 'DELETE' });
+    toast('Ручные правки отменены');
+    await refreshPreview();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
   }
 }
 

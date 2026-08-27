@@ -183,4 +183,10 @@ class PreviewRequest(BaseModel):
 
 
 class PreviewResponse(BaseModel):
-    html: str
+    paragraphs: List[str]
+    has_manual_edit: bool = False
+
+
+class CaseDocumentEditRequest(BaseModel):
+    template_id: UUID
+    paragraphs: List[str]

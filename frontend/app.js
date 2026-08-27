@@ -158,14 +158,21 @@ function renderCategoryTree(){
     const p = c.parent_id || 'root';
     (byParent[p] = byParent[p] || []).push(c);
   });
-  function renderLevel(parentKey, depth){
-    const items = byParent[parentKey] || [];
-    return items.map(c => `
+  function categoryRow(c, depth){
+    return `
       <div class="tree-row" style="padding-left:${12 + depth*20}px;">
         <span class="tree-name">${escapeHtml(c.name)}${!c.is_active ? ' <span style="color:var(--muted);">(неактивна)</span>' : ''}</span>
+        <span class="row-actions">
+          <button class="icon-btn" onclick="renameCategoryPrompt('${c.id}')" title="Переименовать">✎</button>
+          <button class="icon-btn danger" onclick="deleteCategoryConfirm('${c.id}')" title="Удалить">🗑</button>
+        </span>
       </div>
       ${renderLevel(c.id, depth+1)}
-    `).join('');
+    `;
+  }
+  function renderLevel(parentKey, depth){
+    const items = byParent[parentKey] || [];
+    return items.map(c => categoryRow(c, depth)).join('');
   }
   // Корневые категории группируем по направлению (branch), т.к. это два
   // самостоятельных дерева — гражданские/административные дела и СВО.
@@ -182,13 +189,42 @@ function renderCategoryTree(){
 
   box.innerHTML = grouped.map(g => `
     <div style="padding:10px 12px 4px;font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:700;">${g.label}</div>
-    ${g.items.map(c => `
-      <div class="tree-row" style="padding-left:12px;">
-        <span class="tree-name">${escapeHtml(c.name)}${!c.is_active ? ' <span style="color:var(--muted);">(неактивна)</span>' : ''}</span>
-      </div>
-      ${renderLevel(c.id, 1)}
-    `).join('')}
+    ${g.items.map(c => categoryRow(c, 0)).join('')}
   `).join('');
+}
+
+async function renameCategoryPrompt(categoryId){
+  const category = state.categories.find(c => c.id === categoryId);
+  if (!category) return;
+  const newName = window.prompt('Новое название категории:', category.name);
+  if (newName === null) return; // отмена
+  const trimmed = newName.trim();
+  if (!trimmed || trimmed === category.name) return;
+  try {
+    await api(`/categories/${categoryId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ name: trimmed })
+    });
+    toast('Категория переименована');
+    await loadCategories();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
+async function deleteCategoryConfirm(categoryId){
+  const category = state.categories.find(c => c.id === categoryId);
+  if (!category) return;
+  const ok = window.confirm(`Удалить категорию «${category.name}»? Дочерние категории тоже будут скрыты. Уже существующие шаблоны и дела не пострадают.`);
+  if (!ok) return;
+  try {
+    await api(`/categories/${categoryId}`, { method: 'DELETE' });
+    toast('Категория удалена');
+    await loadCategories();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
 }
 
 function renderCategorySelects(){
@@ -359,12 +395,18 @@ async function openTemplateFields(id){
 function renderFieldsForm(fields){
   const box = document.getElementById('feFormBox');
   if (!fields.length){
-    box.innerHTML = '<div style="color:var(--muted);">В этом документе не найдено плейсхолдеров</div>';
+    box.innerHTML = '<div style="color:var(--muted);">В этом документе не найдено плейсхолдеров — добавьте поле вручную кнопкой ниже</div>';
     return;
   }
   box.innerHTML = fields.map(f => `
     <div class="upload-zone" style="max-width:720px;margin-bottom:12px;" data-field-row="${f.id}">
-      <div style="font-family:var(--font-mono);font-size:12px;color:var(--navy);margin-bottom:10px;">{{${escapeHtml(f.field_key)}}}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+        <div class="field" style="margin-bottom:0;flex:1;margin-right:12px;">
+          <label>Плейсхолдер (ключ в тексте документа {{...}})</label>
+          <input data-fe="field_key" value="${escapeHtml(f.field_key)}" style="font-family:var(--font-mono);font-size:12px;">
+        </div>
+        <button class="icon-btn danger" style="margin-top:18px;" onclick="deleteTemplateField('${f.id}')" title="Удалить поле">🗑 Удалить</button>
+      </div>
       <div class="field">
         <label>Название поля (видит юрист в форме)</label>
         <input data-fe="label" value="${escapeHtml(f.label)}">
@@ -402,6 +444,7 @@ async function saveTemplateFields(){
     const isShared = row.querySelector('[data-fe=is_shared]').checked;
     return {
       id: row.getAttribute('data-field-row'),
+      field_key: row.querySelector('[data-fe=field_key]').value.trim(),
       label: row.querySelector('[data-fe=label]').value.trim(),
       field_type: row.querySelector('[data-fe=field_type]').value,
       is_required: row.querySelector('[data-fe=is_required]').checked,
@@ -423,7 +466,38 @@ async function saveTemplateFields(){
   }
 }
 
+async function addTemplateFieldPrompt(){
+  const key = window.prompt('Ключ плейсхолдера (как он написан в документе внутри {{ }}):');
+  if (!key || !key.trim()) return;
+  const label = window.prompt('Название поля для формы юриста:', key.trim()) || key.trim();
+  try {
+    const tmpl = await api(`/templates/${currentFieldsTemplateId}/fields/add`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ field_key: key.trim(), label: label.trim(), field_type: 'text', is_required: false, is_shared: false })
+    });
+    renderFieldsForm(tmpl.fields || []);
+    toast('Поле добавлено');
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
+async function deleteTemplateField(fieldId){
+  const ok = window.confirm('Удалить это поле из карты полей шаблона?');
+  if (!ok) return;
+  try {
+    const tmpl = await api(`/templates/${currentFieldsTemplateId}/fields/${fieldId}`, { method: 'DELETE' });
+    renderFieldsForm(tmpl.fields || []);
+    toast('Поле удалено');
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
 // ---------- пакеты ----------
+
+let editingPackageId = null;
 
 async function loadAllPackages(){
   state.packages = await api('/packages');
@@ -434,7 +508,7 @@ function renderAdminPackagesTable(){
   const body = document.getElementById('adminPkgBody');
   if (!body) return;
   if (!state.packages.length){
-    body.innerHTML = '<tr><td colspan="3" style="color:var(--muted);">Пакетов пока нет</td></tr>';
+    body.innerHTML = '<tr><td colspan="4" style="color:var(--muted);">Пакетов пока нет</td></tr>';
     return;
   }
   body.innerHTML = state.packages.map(p => `
@@ -442,6 +516,10 @@ function renderAdminPackagesTable(){
       <td>${escapeHtml(p.name)}</td>
       <td>${escapeHtml(categoryName(p.category_id))}</td>
       <td>${p.items.length}</td>
+      <td style="text-align:right;white-space:nowrap;">
+        <button class="btn btn-sm" onclick="editPackage('${p.id}')">Изменить</button>
+        <button class="btn btn-sm" style="color:var(--wine);" onclick="deletePackageConfirm('${p.id}')">Удалить</button>
+      </td>
     </tr>`).join('');
 }
 
@@ -457,14 +535,39 @@ function onPkgCategoryChange(){
     box.innerHTML = '<div style="color:var(--muted);font-size:13px;">В этой категории пока нет шаблонов</div>';
     return;
   }
+  const checkedIds = editingPackageId
+    ? new Set((state.packages.find(p => p.id === editingPackageId)?.items || []).map(i => i.template_id))
+    : new Set();
   box.innerHTML = inCategory.map(t => `
     <label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;">
-      <input type="checkbox" value="${t.id}" data-pkg-tmpl> ${escapeHtml(t.name)}
+      <input type="checkbox" value="${t.id}" data-pkg-tmpl ${checkedIds.has(t.id) ? 'checked' : ''}> ${escapeHtml(t.name)}
       ${t.status !== 'published' ? '<span class="badge badge-draft" style="margin-left:6px;">черновик</span>' : ''}
     </label>`).join('');
 }
 
-async function createPackage(){
+function editPackage(packageId){
+  const pkg = state.packages.find(p => p.id === packageId);
+  if (!pkg) return;
+  editingPackageId = packageId;
+  document.getElementById('newPkgName').value = pkg.name;
+  document.getElementById('newPkgCategory').value = pkg.category_id;
+  onPkgCategoryChange();
+  document.getElementById('createPkgBtn').textContent = 'Сохранить изменения';
+  document.getElementById('cancelPkgEditBtn').style.display = 'inline-block';
+  switchNav('admin-packages', document.querySelector('[data-nav=admin-packages]'));
+  document.getElementById('newPkgName').scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+function resetPackageForm(){
+  editingPackageId = null;
+  document.getElementById('newPkgName').value = '';
+  document.getElementById('newPkgCategory').value = '';
+  document.getElementById('newPkgTemplates').innerHTML = '<div style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>';
+  document.getElementById('createPkgBtn').textContent = 'Создать пакет';
+  document.getElementById('cancelPkgEditBtn').style.display = 'none';
+}
+
+async function savePackage(){
   const name = document.getElementById('newPkgName').value.trim();
   const categoryId = document.getElementById('newPkgCategory').value;
   const templateIds = Array.from(document.querySelectorAll('#newPkgTemplates [data-pkg-tmpl]:checked')).map(el => el.value);
@@ -479,21 +582,43 @@ async function createPackage(){
   const btn = document.getElementById('createPkgBtn');
   btn.disabled = true;
   try {
-    await api('/packages', {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ name, category_id: categoryId, template_ids: templateIds })
-    });
-    document.getElementById('newPkgName').value = '';
-    document.getElementById('newPkgCategory').value = '';
-    document.getElementById('newPkgTemplates').innerHTML = '<div style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>';
-    toast('Пакет создан');
+    if (editingPackageId){
+      await api(`/packages/${editingPackageId}`, {
+        method: 'PATCH',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name, template_ids: templateIds })
+      });
+      toast('Пакет обновлён');
+    } else {
+      await api('/packages', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ name, category_id: categoryId, template_ids: templateIds })
+      });
+      toast('Пакет создан');
+    }
+    resetPackageForm();
     await loadAllPackages();
   } catch (err){
     errBox.textContent = 'Ошибка: ' + err.message;
     errBox.style.display = 'block';
   } finally {
     btn.disabled = false;
+  }
+}
+
+async function deletePackageConfirm(packageId){
+  const pkg = state.packages.find(p => p.id === packageId);
+  if (!pkg) return;
+  const ok = window.confirm(`Удалить пакет «${pkg.name}»? Уже созданные дела с этим пакетом не пострадают, просто потеряют ссылку на него.`);
+  if (!ok) return;
+  try {
+    await api(`/packages/${packageId}`, { method: 'DELETE' });
+    toast('Пакет удалён');
+    if (editingPackageId === packageId) resetPackageForm();
+    await loadAllPackages();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
   }
 }
 
@@ -516,13 +641,14 @@ function renderCasesList(){
   const body = document.getElementById('casesListBody');
   if (!body) return;
   if (!state.cases.length){
-    body.innerHTML = '<tr><td colspan="5" style="color:var(--muted);">Дел пока нет</td></tr>';
+    body.innerHTML = '<tr><td colspan="6" style="color:var(--muted);">Дел пока нет</td></tr>';
     return;
   }
   body.innerHTML = state.cases.map(c => `
     <tr>
       <td>${escapeHtml(c.client_name)}</td>
       <td>${escapeHtml(categoryName(c.category_id))}</td>
+      <td>${escapeHtml(c.created_by_email || c.created_by_name || '—')}</td>
       <td><span class="badge badge-draft">${statusLabel(c.status)}</span></td>
       <td>${new Date(c.created_at).toLocaleDateString('ru-RU')}</td>
       <td style="text-align:right;"><button class="btn btn-sm" onclick="openCase('${c.id}')">Открыть</button></td>
@@ -611,7 +737,8 @@ async function openCase(caseId){
 
     document.getElementById('caseTitle').textContent = currentCase.client_name;
     document.getElementById('caseSub').textContent =
-      categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status);
+      categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status) +
+      (currentCase.created_by_email ? ' · автор: ' + currentCase.created_by_email : '');
 
     // Список опубликованных шаблонов в категории дела, доступных для выбора
     if (!state.templates.length) await loadTemplates();
@@ -620,8 +747,44 @@ async function openCase(caseId){
     renderCaseTemplatesBox(available);
     await renderCaseFieldsForm(available);
     renderCaseDocuments();
+    renderCaseDocTabs(available);
 
     switchNav('case-detail', null);
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
+async function renameCurrentCase(){
+  if (!currentCase) return;
+  const newName = window.prompt('Новое имя клиента:', currentCase.client_name);
+  if (newName === null) return;
+  const trimmed = newName.trim();
+  if (!trimmed || trimmed === currentCase.client_name) return;
+  try {
+    currentCase = await api(`/cases/${currentCase.id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ client_name: trimmed })
+    });
+    document.getElementById('caseTitle').textContent = currentCase.client_name;
+    toast('Дело переименовано');
+    await loadCasesList();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
+async function deleteCurrentCase(){
+  if (!currentCase) return;
+  const ok = window.confirm(`Удалить дело «${currentCase.client_name}»? Все сгенерированные документы будут удалены безвозвратно.`);
+  if (!ok) return;
+  try {
+    await api(`/cases/${currentCase.id}`, { method: 'DELETE' });
+    toast('Дело удалено');
+    currentCase = null;
+    await loadCasesList();
+    switchNav('cases-list', document.querySelector(state.role === 'admin' ? '#nav-admin [data-nav=cases-list]' : '#nav-lawyer [data-nav=cases-list]'));
   } catch (err){
     toast('Ошибка: ' + err.message);
   }
@@ -648,6 +811,7 @@ async function onCaseTemplateToggle(){
   );
   const available = state.templates.filter(t => t.category_id === currentCase.category_id && t.status === 'published');
   await renderCaseFieldsForm(available);
+  renderCaseDocTabs(available);
 }
 
 async function renderCaseFieldsForm(available){
@@ -683,8 +847,8 @@ async function renderCaseFieldsForm(available){
         <div class="field">
           <label>${escapeHtml(f.label)}${f.is_required ? ' *' : ''}${f.is_shared ? ' <span style="color:var(--muted);font-weight:400;">(общее)</span>' : ''}</label>
           ${f.field_type === 'textarea'
-            ? `<textarea rows="3" data-field-key="${escapeHtml(groupKey)}">${escapeHtml(existingValues[groupKey] || '')}</textarea>`
-            : `<input data-field-key="${escapeHtml(groupKey)}" value="${escapeHtml(existingValues[groupKey] || '')}">`}
+            ? `<textarea rows="3" data-field-key="${escapeHtml(groupKey)}" oninput="scheduleRefreshPreview()">${escapeHtml(existingValues[groupKey] || '')}</textarea>`
+            : `<input data-field-key="${escapeHtml(groupKey)}" value="${escapeHtml(existingValues[groupKey] || '')}" oninput="scheduleRefreshPreview()">`}
         </div>`).join('')
     : '<div style="color:var(--muted);">В выбранных документах не найдено полей</div>';
 }
@@ -706,6 +870,75 @@ async function saveCaseFields(){
   } catch (err){
     errBox.textContent = 'Ошибка сохранения: ' + err.message;
     errBox.style.display = 'block';
+  }
+}
+
+// ---------- предпросмотр документа (вкладки + живой рендер) ----------
+
+let currentDocTabId = null;
+let previewDebounceTimer = null;
+
+function renderCaseDocTabs(available){
+  const tabsBox = document.getElementById('docTabs');
+  const selected = available.filter(t => currentCaseSelectedTemplates.has(t.id));
+
+  if (!selected.length){
+    tabsBox.innerHTML = '';
+    document.getElementById('docPreviewTitle').textContent = '—';
+    document.getElementById('docBody').innerHTML = '<div class="doc-body-empty">Отметьте документ слева, чтобы увидеть предпросмотр</div>';
+    currentDocTabId = null;
+    return;
+  }
+
+  if (!currentDocTabId || !selected.some(t => t.id === currentDocTabId)){
+    currentDocTabId = selected[0].id;
+  }
+
+  tabsBox.innerHTML = selected.map(t => `
+    <div class="doc-tab ${t.id === currentDocTabId ? 'active' : ''}" data-doc="${t.id}" onclick="selectDocTab('${t.id}')">
+      <span class="dot"></span>${escapeHtml(t.name)}
+    </div>`).join('');
+
+  refreshPreview();
+}
+
+function selectDocTab(templateId){
+  currentDocTabId = templateId;
+  document.querySelectorAll('.doc-tab').forEach(el => el.classList.toggle('active', el.dataset.doc === templateId));
+  refreshPreview();
+}
+
+function scheduleRefreshPreview(){
+  clearTimeout(previewDebounceTimer);
+  previewDebounceTimer = setTimeout(refreshPreview, 500);
+}
+
+function highlightGaps(html){
+  // Сервер вставляет служебные метки вида ⟦не заполнено: label⟧ вместо
+  // пустых значений в предпросмотре — оборачиваем их в заметный стиль,
+  // как «пропуски» в прототипе. В итоговом скачанном файле таких меток нет.
+  return html.replace(/⟦([^⟧]*)⟧/g, '<span class="gap">$1</span>');
+}
+
+async function refreshPreview(){
+  if (!currentDocTabId || !currentCase) return;
+  const template = state.templates.find(t => t.id === currentDocTabId);
+  document.getElementById('docPreviewTitle').textContent = template ? template.name : '—';
+
+  const inputs = document.querySelectorAll('#caseFieldsBox [data-field-key]');
+  const values = {};
+  inputs.forEach(el => { values[el.getAttribute('data-field-key')] = el.value; });
+
+  const docBody = document.getElementById('docBody');
+  try {
+    const result = await api(`/cases/${currentCase.id}/preview`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ template_id: currentDocTabId, values })
+    });
+    docBody.innerHTML = highlightGaps(result.html);
+  } catch (err){
+    docBody.innerHTML = `<div class="doc-body-empty">Не удалось построить предпросмотр: ${escapeHtml(err.message)}</div>`;
   }
 }
 
@@ -760,18 +993,66 @@ async function downloadCaseDocument(documentId, format){
     });
     if (res.status === 401){ doLogout(); throw new Error('Сессия истекла'); }
     if (!res.ok) throw new Error('HTTP ' + res.status);
+    const filename = filenameFromResponse(res, `document.${format}`);
     const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `document.${format}`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    triggerBlobDownload(blob, filename);
   } catch (err){
     toast('Ошибка скачивания: ' + err.message);
   }
+}
+
+function downloadActiveTabDoc(format){
+  if (!currentDocTabId || !currentCase) return;
+  const doc = (currentCase.documents || []).find(d => d.template_id === currentDocTabId);
+  if (!doc){
+    toast('Сначала сгенерируйте документы для этого дела');
+    return;
+  }
+  if (format === 'pdf' && !doc.has_pdf){
+    toast('PDF-версия для этого документа недоступна');
+    return;
+  }
+  downloadCaseDocument(doc.id, format);
+}
+
+async function downloadAllCaseDocuments(){
+  if (!currentCase) return;
+  try {
+    const res = await fetch(`${API}/cases/${currentCase.id}/download-all`, {
+      headers: { 'Authorization': 'Bearer ' + state.token }
+    });
+    if (res.status === 401){ doLogout(); throw new Error('Сессия истекла'); }
+    if (!res.ok) {
+      let msg = 'HTTP ' + res.status;
+      try { const body = await res.json(); if (body.detail) msg = body.detail; } catch(e){}
+      throw new Error(msg);
+    }
+    const filename = filenameFromResponse(res, 'документы.zip');
+    const blob = await res.blob();
+    triggerBlobDownload(blob, filename);
+  } catch (err){
+    toast('Ошибка скачивания: ' + err.message);
+  }
+}
+
+function filenameFromResponse(res, fallback){
+  const cd = res.headers.get('Content-Disposition') || '';
+  let match = cd.match(/filename\*=UTF-8''([^;]+)/);
+  if (match) { try { return decodeURIComponent(match[1]); } catch(e) {} }
+  match = cd.match(/filename="?([^";]+)"?/);
+  if (match) return match[1];
+  return fallback;
+}
+
+function triggerBlobDownload(blob, filename){
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function escapeHtml(s){

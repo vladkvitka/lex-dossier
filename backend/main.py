@@ -290,6 +290,52 @@ def publish_template(
     return template
 
 
+@app.delete("/api/templates/{template_id}")
+def delete_template(
+    template_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    template = db.query(models.Template).filter(models.Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+
+    used_in_packages = (
+        db.query(models.TemplatePackageItem)
+        .filter(models.TemplatePackageItem.template_id == template_id)
+        .count()
+    )
+    used_in_documents = (
+        db.query(models.CaseDocument)
+        .filter(models.CaseDocument.template_id == template_id)
+        .count()
+    )
+    if used_in_packages or used_in_documents:
+        parts = []
+        if used_in_packages:
+            parts.append(f"используется в пакетах: {used_in_packages}")
+        if used_in_documents:
+            parts.append(f"по нему уже сгенерированы документы: {used_in_documents}")
+        raise HTTPException(
+            status_code=400,
+            detail="Нельзя удалить шаблон — " + "; ".join(parts) +
+            ". Уберите его из пакетов (сгенерированные документы удалить нельзя — это история дел клиентов).",
+        )
+
+    db.query(models.TemplateField).filter(models.TemplateField.template_id == template_id).delete()
+    db.delete(template)
+    db.commit()
+
+    template_dir = os.path.join(STORAGE_TEMPLATES_DIR, str(template_id))
+    if os.path.isdir(template_dir):
+        try:
+            shutil.rmtree(template_dir)
+        except OSError:
+            pass
+
+    return {"status": "ok"}
+
+
 @app.post("/api/templates/{template_id}/fields", response_model=TemplateDetailOut)
 def update_template_fields(
     template_id: uuid.UUID,

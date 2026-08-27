@@ -14,6 +14,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from docxtpl import DocxTemplate
 from docx import Document as DocxDocument
+import jinja2
 
 from database import Base, engine, get_db
 import models
@@ -46,6 +47,7 @@ from schemas import (
 from security import verify_password, create_access_token
 from deps import get_current_user, require_admin
 from docx_utils import extract_placeholders
+from name_utils import build_clean_filters, build_preview_filters
 
 Base.metadata.create_all(bind=engine)
 
@@ -952,7 +954,9 @@ def generate_documents(
 
         try:
             doc = DocxTemplate(template.source_file_path)
-            doc.render(context)
+            jinja_env = jinja2.Environment()
+            jinja_env.filters.update(build_clean_filters())
+            doc.render(context, jinja_env)
             doc.save(docx_path)
         except Exception as e:
             raise HTTPException(
@@ -1035,15 +1039,20 @@ def preview_document(
     for f in template_fields:
         lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
         value = data.values.get(lookup_key)
-        # Пустое поле помечаем служебной меткой — фронтенд подсвечивает её
-        # как «пропуск» (аналог подсветки незаполненных полей в прототипе).
-        # В реальный сохранённый .docx такая метка никогда не попадает.
-        context[f.field_key] = value if value else f"⟦не заполнено: {f.label}⟧"
+        # Пустое поле — служебная метка ⟦...⟧ (подсветится красным на фронте).
+        # Заполненное — метка ⟪...⟫ (подсветится синим): так лавочник видит,
+        # что этот текст — результат подстановки (включая склонение через
+        # фильтры |dative и т.п.), а не исходный текст шаблона, и может
+        # проверить его перед генерацией. В реальный .docx эти метки не
+        # попадают — там значения подставляются без обёртки (см. generate).
+        context[f.field_key] = f"⟪{value}⟫" if value else f"⟦не заполнено: {f.label}⟧"
 
     tmp_path = None
     try:
         doc = DocxTemplate(template.source_file_path)
-        doc.render(context)
+        jinja_env = jinja2.Environment()
+        jinja_env.filters.update(build_preview_filters())
+        doc.render(context, jinja_env)
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             tmp_path = tmp.name
         doc.save(tmp_path)

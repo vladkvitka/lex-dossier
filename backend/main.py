@@ -1,13 +1,19 @@
 import os
+import re
 import shutil
 import subprocess
+import tempfile
 import uuid
+import zipfile
+import io
 from typing import List, Optional, Dict
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from docxtpl import DocxTemplate
+import mammoth
+from docx import Document as DocxDocument
 
 from database import Base, engine, get_db
 import models
@@ -15,21 +21,26 @@ from schemas import (
     LoginRequest,
     TokenResponse,
     CategoryCreate,
+    CategoryUpdate,
     CategoryOut,
     TemplateOut,
     TemplateDetailOut,
     TemplateFieldOut,
     TemplateFieldsUpdateRequest,
+    TemplateFieldCreate,
     PackageCreate,
     PackageUpdate,
     PackageOut,
     PackageItemOut,
     CaseCreate,
+    CaseUpdate,
     CaseOut,
     CaseDetailOut,
     CaseFieldValueOut,
     CaseDocumentOut,
     GenerateRequest,
+    PreviewRequest,
+    PreviewResponse,
 )
 from security import verify_password, create_access_token
 from deps import get_current_user, require_admin
@@ -102,6 +113,60 @@ def create_category(
     db.commit()
     db.refresh(category)
     return category
+
+
+@app.patch("/api/categories/{category_id}", response_model=CategoryOut)
+def update_category(
+    category_id: uuid.UUID,
+    data: CategoryUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    if data.name is not None:
+        category.name = data.name
+    if data.branch is not None:
+        category.branch = data.branch
+    if "parent_id" in data.model_fields_set:
+        if data.parent_id == category_id:
+            raise HTTPException(status_code=400, detail="Категория не может быть родителем самой себя")
+        category.parent_id = data.parent_id
+    if data.sort_order is not None:
+        category.sort_order = data.sort_order
+    db.commit()
+    db.refresh(category)
+    return category
+
+
+def _collect_category_and_descendants(db: Session, category_id: uuid.UUID) -> List[uuid.UUID]:
+    ids = [category_id]
+    children = db.query(models.Category).filter(models.Category.parent_id == category_id).all()
+    for child in children:
+        ids.extend(_collect_category_and_descendants(db, child.id))
+    return ids
+
+
+@app.delete("/api/categories/{category_id}")
+def delete_category(
+    category_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Мягкое удаление (is_active=false), каскадом на все дочерние категории.
+    Так сохраняются ссылки из уже существующих шаблонов, пакетов и дел —
+    они просто перестают предлагаться для новых, но не ломаются."""
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+
+    ids = _collect_category_and_descendants(db, category_id)
+    db.query(models.Category).filter(models.Category.id.in_(ids)).update(
+        {"is_active": False}, synchronize_session=False
+    )
+    db.commit()
+    return {"status": "ok", "deactivated": [str(i) for i in ids]}
 
 
 @app.get("/api/templates", response_model=List[TemplateOut])
@@ -246,6 +311,7 @@ def update_template_fields(
         field = fields_by_id.get(upd.id)
         if not field:
             raise HTTPException(status_code=404, detail=f"Поле {upd.id} не найдено в этом шаблоне")
+        field.field_key = upd.field_key
         field.label = upd.label
         field.field_type = upd.field_type
         field.is_required = upd.is_required
@@ -253,6 +319,90 @@ def update_template_fields(
         field.shared_group_key = upd.shared_group_key if upd.is_shared else None
     db.commit()
 
+    fields = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.template_id == template_id)
+        .order_by(models.TemplateField.sort_order)
+        .all()
+    )
+    return TemplateDetailOut(
+        id=template.id,
+        category_id=template.category_id,
+        name=template.name,
+        description=template.description,
+        status=template.status,
+        file_version=template.file_version,
+        fields=[TemplateFieldOut.model_validate(f) for f in fields],
+    )
+
+
+@app.post("/api/templates/{template_id}/fields/add", response_model=TemplateDetailOut)
+def add_template_field(
+    template_id: uuid.UUID,
+    data: TemplateFieldCreate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Добавить поле вручную — на случай, если автоматический разбор .docx
+    что-то пропустил, либо в шаблон добавили новый плейсхолдер вручную."""
+    template = db.query(models.Template).filter(models.Template.id == template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+
+    max_sort = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.template_id == template_id)
+        .count()
+    )
+    field = models.TemplateField(
+        id=uuid.uuid4(),
+        template_id=template_id,
+        field_key=data.field_key,
+        label=data.label,
+        field_type=data.field_type,
+        is_required=data.is_required,
+        is_shared=data.is_shared,
+        shared_group_key=data.shared_group_key if data.is_shared else None,
+        sort_order=max_sort,
+    )
+    db.add(field)
+    db.commit()
+
+    fields = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.template_id == template_id)
+        .order_by(models.TemplateField.sort_order)
+        .all()
+    )
+    return TemplateDetailOut(
+        id=template.id,
+        category_id=template.category_id,
+        name=template.name,
+        description=template.description,
+        status=template.status,
+        file_version=template.file_version,
+        fields=[TemplateFieldOut.model_validate(f) for f in fields],
+    )
+
+
+@app.delete("/api/templates/{template_id}/fields/{field_id}", response_model=TemplateDetailOut)
+def delete_template_field(
+    template_id: uuid.UUID,
+    field_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    field = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.id == field_id, models.TemplateField.template_id == template_id)
+        .first()
+    )
+    if not field:
+        raise HTTPException(status_code=404, detail="Поле не найдено")
+    db.delete(field)
+    db.commit()
+
+    template = db.query(models.Template).filter(models.Template.id == template_id).first()
     fields = (
         db.query(models.TemplateField)
         .filter(models.TemplateField.template_id == template_id)
@@ -369,6 +519,29 @@ def update_package(
     return _package_to_out(db, package)
 
 
+@app.delete("/api/packages/{package_id}")
+def delete_package(
+    package_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    package = db.query(models.TemplatePackage).filter(models.TemplatePackage.id == package_id).first()
+    if not package:
+        raise HTTPException(status_code=404, detail="Пакет не найден")
+
+    # У дел, ссылавшихся на этот пакет, просто снимаем ссылку —
+    # сами дела и уже сгенерированные документы не трогаем.
+    db.query(models.Case).filter(models.Case.package_id == package_id).update(
+        {"package_id": None}, synchronize_session=False
+    )
+    db.query(models.TemplatePackageItem).filter(
+        models.TemplatePackageItem.package_id == package_id
+    ).delete()
+    db.delete(package)
+    db.commit()
+    return {"status": "ok"}
+
+
 # ---------- Дела ----------
 
 def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
@@ -384,6 +557,7 @@ def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
         .order_by(models.CaseDocument.generated_at)
         .all()
     )
+    creator = db.query(models.User).filter(models.User.id == case.created_by).first()
     return CaseDetailOut(
         id=case.id,
         client_name=case.client_name,
@@ -391,6 +565,8 @@ def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
         package_id=case.package_id,
         status=case.status,
         created_at=case.created_at,
+        created_by_name=creator.full_name if creator else None,
+        created_by_email=creator.email if creator else None,
         fields=[CaseFieldValueOut.model_validate(f) for f in field_values],
         documents=[
             CaseDocumentOut(
@@ -413,7 +589,19 @@ def list_cases(
     # Юрист и админ пока видят все дела (спецификация не разделяет видимость
     # по автору) — если понадобится ограничить юриста только своими делами,
     # здесь нужно добавить .filter(models.Case.created_by == current_user.id)
-    return db.query(models.Case).order_by(models.Case.created_at.desc()).all()
+    rows = (
+        db.query(models.Case, models.User.full_name, models.User.email)
+        .outerjoin(models.User, models.User.id == models.Case.created_by)
+        .order_by(models.Case.created_at.desc())
+        .all()
+    )
+    result = []
+    for case, creator_name, creator_email in rows:
+        item = CaseOut.model_validate(case)
+        item.created_by_name = creator_name
+        item.created_by_email = creator_email
+        result.append(item)
+    return result
 
 
 @app.post("/api/cases", response_model=CaseOut)
@@ -455,6 +643,53 @@ def get_case(
     if not case:
         raise HTTPException(status_code=404, detail="Дело не найдено")
     return _case_to_detail(db, case)
+
+
+@app.patch("/api/cases/{case_id}", response_model=CaseDetailOut)
+def update_case(
+    case_id: uuid.UUID,
+    data: CaseUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+    if data.client_name is not None:
+        case.client_name = data.client_name
+    if data.status is not None:
+        case.status = data.status
+    db.commit()
+    db.refresh(case)
+    return _case_to_detail(db, case)
+
+
+@app.delete("/api/cases/{case_id}")
+def delete_case(
+    case_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    # Пробуем убрать файлы сгенерированных документов с диска — best effort,
+    # ошибка удаления файла не должна мешать удалению записей в базе.
+    documents = db.query(models.CaseDocument).filter(models.CaseDocument.case_id == case_id).all()
+    for doc in documents:
+        for path in (doc.docx_file_path, doc.pdf_file_path):
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+
+    db.query(models.CaseDocument).filter(models.CaseDocument.case_id == case_id).delete()
+    db.query(models.CaseFieldValue).filter(models.CaseFieldValue.case_id == case_id).delete()
+    db.delete(case)
+    db.commit()
+    return {"status": "ok"}
 
 
 @app.put("/api/cases/{case_id}/fields", response_model=CaseDetailOut)
@@ -508,6 +743,67 @@ def _convert_to_pdf(docx_path: str, out_dir: str) -> Optional[str]:
         return pdf_path if os.path.exists(pdf_path) else None
     except Exception:
         return None
+
+
+def _set_run_font(run, font_name: str = "Times New Roman"):
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+
+    run.font.name = font_name
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.append(rFonts)
+    rFonts.set(qn("w:ascii"), font_name)
+    rFonts.set(qn("w:hAnsi"), font_name)
+    rFonts.set(qn("w:eastAsia"), font_name)
+    rFonts.set(qn("w:cs"), font_name)
+
+
+def _normalize_font(docx_path: str, font_name: str = "Times New Roman"):
+    """Принудительно приводит шрифт всего документа (включая текст,
+    подставленный в плейсхолдеры) к единому шрифту — чтобы вставленные
+    значения визуально не отличались от остального текста шаблона.
+    При любой ошибке молча пропускает — это не должно ломать генерацию."""
+    try:
+        doc = DocxDocument(docx_path)
+
+        def process(paragraphs):
+            for p in paragraphs:
+                for run in p.runs:
+                    _set_run_font(run, font_name)
+
+        process(doc.paragraphs)
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    process(cell.paragraphs)
+        for section in doc.sections:
+            process(section.header.paragraphs)
+            process(section.footer.paragraphs)
+        doc.save(docx_path)
+    except Exception:
+        pass
+
+
+def _format_client_short_name(full_name: str) -> str:
+    """«Иванов Иван Иванович» -> «Иванов И.И.»"""
+    parts = [p for p in (full_name or "").strip().split() if p]
+    if not parts:
+        return "Клиент"
+    surname = parts[0]
+    initials = "".join(f"{p[0].upper()}." for p in parts[1:3])
+    return f"{surname} {initials}".strip()
+
+
+def _sanitize_filename(name: str) -> str:
+    name = re.sub(r'[\\/:*?"<>|]', "", name).strip()
+    return name or "document"
+
+
+def _build_document_filename(client_name: str, template_name: str, ext: str) -> str:
+    return _sanitize_filename(f"{_format_client_short_name(client_name)} {template_name}") + "." + ext
 
 
 @app.post("/api/cases/{case_id}/generate", response_model=List[CaseDocumentOut])
@@ -565,6 +861,8 @@ def generate_documents(
                 detail=f"Не удалось сформировать документ по шаблону «{template.name}»: {e}",
             )
 
+        _normalize_font(docx_path)
+
         pdf_path = _convert_to_pdf(docx_path, case_dir)
 
         case_document = models.CaseDocument(
@@ -592,6 +890,60 @@ def generate_documents(
     ]
 
 
+@app.post("/api/cases/{case_id}/preview", response_model=PreviewResponse)
+def preview_document(
+    case_id: uuid.UUID,
+    data: PreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Живой предпросмотр документа по текущим (возможно ещё не сохранённым)
+    значениям формы — ничего не пишет в базу и не создаёт файлов в хранилище,
+    только временный файл для конвертации в HTML."""
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    template = db.query(models.Template).filter(models.Template.id == data.template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    if current_user.role != "admin" and template.status != "published":
+        raise HTTPException(status_code=403, detail="Шаблон недоступен")
+
+    template_fields = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.template_id == data.template_id)
+        .all()
+    )
+    context = {}
+    for f in template_fields:
+        lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
+        value = data.values.get(lookup_key)
+        # В отличие от финальной генерации, в предпросмотре пустое поле
+        # помечаем служебной меткой — фронтенд подсвечивает её как «пропуск»
+        # (аналог подсветки незаполненных полей в прототипе). В реальный
+        # сохранённый .docx такая метка никогда не попадает.
+        context[f.field_key] = value if value else f"⟦не заполнено: {f.label}⟧"
+
+    tmp_path = None
+    try:
+        doc = DocxTemplate(template.source_file_path)
+        doc.render(context)
+        with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+            tmp_path = tmp.name
+        doc.save(tmp_path)
+        with open(tmp_path, "rb") as f:
+            result = mammoth.convert_to_html(f)
+        html = result.value
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось построить предпросмотр: {e}")
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.remove(tmp_path)
+
+    return PreviewResponse(html=html)
+
+
 @app.get("/api/cases/{case_id}/documents/{document_id}/download")
 def download_document(
     case_id: uuid.UUID,
@@ -600,13 +952,16 @@ def download_document(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    document = (
-        db.query(models.CaseDocument)
+    row = (
+        db.query(models.CaseDocument, models.Case.client_name, models.Template.name)
+        .join(models.Case, models.Case.id == models.CaseDocument.case_id)
+        .join(models.Template, models.Template.id == models.CaseDocument.template_id)
         .filter(models.CaseDocument.id == document_id, models.CaseDocument.case_id == case_id)
         .first()
     )
-    if not document:
+    if not row:
         raise HTTPException(status_code=404, detail="Документ не найден")
+    document, client_name, template_name = row
 
     if format == "pdf":
         if not document.pdf_file_path or not os.path.exists(document.pdf_file_path):
@@ -614,7 +969,7 @@ def download_document(
         return FileResponse(
             document.pdf_file_path,
             media_type="application/pdf",
-            filename=f"document_{document_id}.pdf",
+            filename=_build_document_filename(client_name, template_name, "pdf"),
         )
 
     if not os.path.exists(document.docx_file_path):
@@ -622,5 +977,50 @@ def download_document(
     return FileResponse(
         document.docx_file_path,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        filename=f"document_{document_id}.docx",
+        filename=_build_document_filename(client_name, template_name, "docx"),
+    )
+
+
+@app.get("/api/cases/{case_id}/download-all")
+def download_all_documents(
+    case_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    rows = (
+        db.query(models.CaseDocument, models.Template.name)
+        .join(models.Template, models.Template.id == models.CaseDocument.template_id)
+        .filter(models.CaseDocument.case_id == case_id)
+        .order_by(models.CaseDocument.generated_at)
+        .all()
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="У этого дела ещё нет сгенерированных документов")
+
+    buffer = io.BytesIO()
+    used_names = set()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        for doc, template_name in rows:
+            if not os.path.exists(doc.docx_file_path):
+                continue
+            base_name = _build_document_filename(case.client_name, template_name, "docx")
+            final_name = base_name
+            i = 2
+            while final_name in used_names:
+                final_name = _sanitize_filename(f"{base_name[:-5]} ({i})") + ".docx"
+                i += 1
+            used_names.add(final_name)
+            zf.write(doc.docx_file_path, arcname=final_name)
+    buffer.seek(0)
+
+    zip_filename = _sanitize_filename(f"{_format_client_short_name(case.client_name)} - документы") + ".zip"
+    from urllib.parse import quote
+    return StreamingResponse(
+        buffer,
+        media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(zip_filename)}"},
     )

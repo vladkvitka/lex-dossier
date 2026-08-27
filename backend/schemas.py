@@ -35,6 +35,13 @@ class CategoryOut(BaseModel):
         from_attributes = True
 
 
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    branch: Optional[str] = None
+    parent_id: Optional[UUID] = None
+    sort_order: Optional[int] = None
+
+
 class TemplateFieldOut(BaseModel):
     id: UUID
     field_key: str
@@ -50,6 +57,7 @@ class TemplateFieldOut(BaseModel):
 
 class TemplateFieldUpdate(BaseModel):
     id: UUID
+    field_key: str
     label: str
     field_type: str
     is_required: bool
@@ -59,6 +67,15 @@ class TemplateFieldUpdate(BaseModel):
 
 class TemplateFieldsUpdateRequest(BaseModel):
     fields: List[TemplateFieldUpdate]
+
+
+class TemplateFieldCreate(BaseModel):
+    field_key: str
+    label: str
+    field_type: str = "text"
+    is_required: bool = False
+    is_shared: bool = False
+    shared_group_key: Optional[str] = None
 
 
 class TemplateOut(BaseModel):
@@ -120,9 +137,16 @@ class CaseOut(BaseModel):
     package_id: Optional[UUID] = None
     status: str
     created_at: datetime
+    created_by_name: Optional[str] = None
+    created_by_email: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class CaseUpdate(BaseModel):
+    client_name: Optional[str] = None
+    status: Optional[str] = None
 
 
 class CaseFieldValueOut(BaseModel):
@@ -151,3 +175,12 @@ class CaseDetailOut(CaseOut):
 
 class GenerateRequest(BaseModel):
     template_ids: List[UUID]
+
+
+class PreviewRequest(BaseModel):
+    template_id: UUID
+    values: Dict[str, str] = {}
+
+
+class PreviewResponse(BaseModel):
+    html: str

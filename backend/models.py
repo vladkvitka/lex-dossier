@@ -117,3 +117,17 @@ class CaseDocument(Base):
     pdf_file_path = Column(String, nullable=True)  # NULL, если конвертация в PDF не удалась
     generated_at = Column(DateTime(timezone=True), server_default=func.now())
     generated_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+
+
+class CaseDocumentEdit(Base):
+    """Ручные правки текста документа (по абзацам), внесённые в предпросмотре
+    до итоговой генерации. Если запись есть — при генерации текст абзацев
+    берётся отсюда, поверх обычной подстановки полей."""
+    __tablename__ = "case_document_edits"
+    __table_args__ = (UniqueConstraint("case_id", "template_id", name="uq_case_doc_edit"),)
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
+    template_id = Column(UUID(as_uuid=True), ForeignKey("templates.id"), nullable=False)
+    paragraphs_json = Column(Text, nullable=False)  # JSON-массив строк — текст абзацев
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

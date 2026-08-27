@@ -150,6 +150,10 @@
               <div class="doc-preview-head">
                 <div class="dt" id="docPreviewTitle">—</div>
                 <div class="doc-actions">
+                  <button class="btn btn-sm" id="docEditBtn" onclick="startEditDoc()">✎ Редактировать</button>
+                  <button class="btn-primary btn-sm" id="docSaveEditBtn" style="display:none;" onclick="saveEditDoc()">Сохранить</button>
+                  <button class="btn btn-sm" id="docCancelEditBtn" style="display:none;" onclick="cancelEditDoc()">Отмена</button>
+                  <button class="btn btn-sm" id="docResetEditBtn" style="display:none;color:var(--wine);" onclick="resetEditDoc()">Сбросить правки</button>
                   <button class="btn btn-sm" onclick="downloadActiveTabDoc('docx')">Скачать .docx</button>
                   <button class="btn btn-sm" onclick="downloadActiveTabDoc('pdf')">Скачать .pdf</button>
                 </div>
@@ -274,6 +278,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=5"></script>
+<script src="app.js?v=6"></script>
 </body>
 </html>

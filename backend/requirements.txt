@@ -13,3 +13,4 @@ python-docx
 docxtpl==0.16.7
 mammoth==1.12.1
 python-docx==1.1.2
+petrovich==2.0.1

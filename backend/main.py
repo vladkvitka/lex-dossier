@@ -111,6 +111,7 @@ def create_category(
         branch=data.branch,
         parent_id=data.parent_id,
         sort_order=data.sort_order,
+        is_universal=data.is_universal,
     )
     db.add(category)
     db.commit()
@@ -138,6 +139,8 @@ def update_category(
         category.parent_id = data.parent_id
     if data.sort_order is not None:
         category.sort_order = data.sort_order
+    if data.is_universal is not None:
+        category.is_universal = data.is_universal
     db.commit()
     db.refresh(category)
     return category
@@ -211,6 +214,7 @@ def get_template(
         description=template.description,
         status=template.status,
         file_version=template.file_version,
+        doc_group=template.doc_group,
         fields=[TemplateFieldOut.model_validate(f) for f in fields],
     )
 
@@ -220,12 +224,15 @@ def create_template(
     category_id: uuid.UUID = Form(...),
     name: str = Form(...),
     description: Optional[str] = Form(None),
+    doc_group: str = Form("main"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin),
 ):
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Файл должен быть в формате .docx")
+    if doc_group not in ("main", "service"):
+        raise HTTPException(status_code=400, detail="Группа документа должна быть 'main' или 'service'")
 
     template_id = uuid.uuid4()
     template_dir = os.path.join(STORAGE_TEMPLATES_DIR, str(template_id))
@@ -243,6 +250,7 @@ def create_template(
         source_file_path=file_path,
         file_version=1,
         status="draft",
+        doc_group=doc_group,
         created_by=current_user.id,
     )
     db.add(template)
@@ -273,6 +281,7 @@ def create_template(
         description=template.description,
         status=template.status,
         file_version=template.file_version,
+        doc_group=template.doc_group,
         fields=[TemplateFieldOut.model_validate(f) for f in fields],
     )
 
@@ -381,6 +390,7 @@ def update_template_fields(
         description=template.description,
         status=template.status,
         file_version=template.file_version,
+        doc_group=template.doc_group,
         fields=[TemplateFieldOut.model_validate(f) for f in fields],
     )
 
@@ -430,6 +440,7 @@ def add_template_field(
         description=template.description,
         status=template.status,
         file_version=template.file_version,
+        doc_group=template.doc_group,
         fields=[TemplateFieldOut.model_validate(f) for f in fields],
     )
 
@@ -465,6 +476,7 @@ def delete_template_field(
         description=template.description,
         status=template.status,
         file_version=template.file_version,
+        doc_group=template.doc_group,
         fields=[TemplateFieldOut.model_validate(f) for f in fields],
     )
 
@@ -907,6 +919,25 @@ def _get_manual_edit(db: Session, case_id: uuid.UUID, template_id: uuid.UUID):
     )
 
 
+def _format_documents_list(db: Session, template_ids: List[uuid.UUID]) -> str:
+    """Нумерованный список названий «основных» документов (doc_group='main')
+    из переданного набора — для автоматического плейсхолдера типа
+    documents_list. Названия — как в библиотеке шаблонов, без фамилии
+    клиента (та добавляется только в имя скачиваемого файла)."""
+    if not template_ids:
+        return "—"
+    templates = (
+        db.query(models.Template)
+        .filter(models.Template.id.in_(template_ids), models.Template.doc_group == "main")
+        .all()
+    )
+    if not templates:
+        return "—"
+    order = {tid: i for i, tid in enumerate(template_ids)}
+    templates.sort(key=lambda t: order.get(t.id, 0))
+    return "; ".join(f"{i + 1}. {t.name}" for i, t in enumerate(templates))
+
+
 @app.post("/api/cases/{case_id}/generate", response_model=List[CaseDocumentOut])
 def generate_documents(
     case_id: uuid.UUID,
@@ -922,6 +953,7 @@ def generate_documents(
         f.field_key: (f.value or "")
         for f in db.query(models.CaseFieldValue).filter(models.CaseFieldValue.case_id == case_id).all()
     }
+    documents_list_text = _format_documents_list(db, data.template_ids)
 
     case_dir = os.path.join(STORAGE_CASES_DIR, str(case_id))
     os.makedirs(case_dir, exist_ok=True)
@@ -943,9 +975,15 @@ def generate_documents(
         # Если поле общее (is_shared) и у него задан shared_group_key —
         # значение ищем именно по нему (так реализовано объединение
         # одинаковых по смыслу полей между разными шаблонами пакета).
+        # Поле с типом documents_list — не вводится вручную, а вычисляется
+        # автоматически: перечень «основных» документов, отмеченных в этом
+        # же запуске генерации.
         # Если значения нет — подставляем пустую строку, чтобы docxtpl не падал.
         context = {}
         for f in template_fields:
+            if f.field_type == "documents_list":
+                context[f.field_key] = documents_list_text
+                continue
             lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
             context[f.field_key] = case_field_values.get(lookup_key, "")
 
@@ -1035,8 +1073,14 @@ def preview_document(
         .filter(models.TemplateField.template_id == data.template_id)
         .all()
     )
+    selected_ids = data.selected_template_ids or [data.template_id]
+    documents_list_text = _format_documents_list(db, selected_ids)
+
     context = {}
     for f in template_fields:
+        if f.field_type == "documents_list":
+            context[f.field_key] = f"⟪{documents_list_text}⟫"
+            continue
         lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
         value = data.values.get(lookup_key)
         # Пустое поле — служебная метка ⟦...⟧ (подсветится красным на фронте).

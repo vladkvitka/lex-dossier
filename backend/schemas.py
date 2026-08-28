@@ -21,6 +21,7 @@ class CategoryCreate(BaseModel):
     branch: str
     parent_id: Optional[UUID] = None
     sort_order: int = 0
+    is_universal: bool = False
 
 
 class CategoryOut(BaseModel):
@@ -30,6 +31,7 @@ class CategoryOut(BaseModel):
     parent_id: Optional[UUID] = None
     sort_order: int
     is_active: bool
+    is_universal: bool = False
 
     class Config:
         from_attributes = True
@@ -40,6 +42,7 @@ class CategoryUpdate(BaseModel):
     branch: Optional[str] = None
     parent_id: Optional[UUID] = None
     sort_order: Optional[int] = None
+    is_universal: Optional[bool] = None
 
 
 class TemplateFieldOut(BaseModel):
@@ -85,6 +88,7 @@ class TemplateOut(BaseModel):
     description: Optional[str] = None
     status: str
     file_version: int
+    doc_group: str = "main"
 
     class Config:
         from_attributes = True
@@ -180,6 +184,10 @@ class GenerateRequest(BaseModel):
 class PreviewRequest(BaseModel):
     template_id: UUID
     values: Dict[str, str] = {}
+    # Полный список отмеченных для генерации шаблонов этого дела — нужен,
+    # чтобы правильно посчитать плейсхолдер «Список документов» (берёт
+    # только «основные» документы из этого набора).
+    selected_template_ids: List[UUID] = []
 
 
 class PreviewResponse(BaseModel):

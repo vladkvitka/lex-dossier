@@ -122,7 +122,16 @@
         <div class="case-columns">
           <div>
             <h2 style="font-size:15px;margin:0 0 10px;">Документы для этого дела</h2>
-            <div id="caseTemplatesBox" class="upload-zone"></div>
+            <div class="doc-group-columns">
+              <div>
+                <div class="doc-group-label">Основные</div>
+                <div id="caseTemplatesBoxMain" class="upload-zone"></div>
+              </div>
+              <div>
+                <div class="doc-group-label">Служебные</div>
+                <div id="caseTemplatesBoxService" class="upload-zone"></div>
+              </div>
+            </div>
 
             <div id="caseFormBox" style="display:none;">
               <h2 style="font-size:15px;margin:26px 0 10px;">Данные дела</h2>
@@ -145,7 +154,8 @@
           </div>
 
           <div>
-            <div class="doc-tabs" id="docTabs"></div>
+            <div class="doc-tabs" id="docGroupTabs"></div>
+            <div class="doc-tabs" id="docTabs" style="margin-top:4px;"></div>
             <div class="doc-preview-panel">
               <div class="doc-preview-head">
                 <div class="dt" id="docPreviewTitle">—</div>
@@ -186,6 +196,10 @@
             <label>Родительская категория (необязательно)</label>
             <select id="newCatParent"><option value="">— без родителя, верхний уровень —</option></select>
           </div>
+          <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:14px;">
+            <input type="checkbox" id="newCatUniversal">
+            Общая категория — её документы доступны при сборке дела/пакета для <b>любой</b> другой категории (например «Общие» с актом сдачи-приёмки)
+          </label>
           <button class="btn-primary" id="addCatBtn" onclick="createCategory()">Добавить категорию</button>
         </div>
 
@@ -205,6 +219,13 @@
           <div class="field">
             <label>Категория</label>
             <select id="newTmplCategory"><option value="">— выберите категорию —</option></select>
+          </div>
+          <div class="field">
+            <label>Группа документа</label>
+            <select id="newTmplGroup">
+              <option value="main">Основные (результат для клиента: иски, ходатайства, жалобы)</option>
+              <option value="service">Служебные (договор на оказание услуг, акты и т.п.)</option>
+            </select>
           </div>
           <div class="field">
             <label>Описание (необязательно)</label>

@@ -177,30 +177,28 @@
       <!-- ===== АДМИН: КАТЕГОРИИ ===== -->
       <div class="screen" id="screen-admin-categories">
         <h1 class="page-title">Дерево категорий</h1>
-        <p class="page-sub">Структура направлений, по которой юристы находят шаблоны</p>
+        <p class="page-sub">Структура направлений СВО и гражданские дела, по которой юристы находят шаблоны</p>
 
         <div class="upload-zone">
           <div class="field">
-            <label>Название новой категории</label>
-            <input id="newCatName" placeholder="Например: Жилищные споры">
-          </div>
-          <div class="field">
-            <label>Направление</label>
-            <select id="newCatBranch">
+            <label>1. Направление</label>
+            <select id="catWizBranch" onchange="onCatWizBranchChange()">
               <option value="">— выберите направление —</option>
-              <option value="civil_admin">Гражданские и административные дела</option>
               <option value="svo">Участники СВО</option>
+              <option value="civil_admin">Гражданские и административные дела</option>
             </select>
           </div>
-          <div class="field">
-            <label>Родительская категория (необязательно)</label>
-            <select id="newCatParent"><option value="">— без родителя, верхний уровень —</option></select>
+          <div class="field" id="catWizParentField" style="display:none;">
+            <label>2. Категория</label>
+            <select id="catWizParent" onchange="onCatWizParentChange()">
+              <option value="new">— новая категория, верхний уровень —</option>
+            </select>
           </div>
-          <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:14px;">
-            <input type="checkbox" id="newCatUniversal">
-            Общая категория — её документы доступны при сборке дела/пакета для <b>любой</b> другой категории (например «Общие» с актом сдачи-приёмки)
-          </label>
-          <button class="btn-primary" id="addCatBtn" onclick="createCategory()">Добавить категорию</button>
+          <div class="field" id="catWizNameField" style="display:none;">
+            <label id="catWizNameLabel">Название новой категории</label>
+            <input id="catWizName" placeholder="ЖИЛИЩНЫЕ СПОРЫ">
+          </div>
+          <button class="btn-primary" id="catWizAddBtn" style="display:none;" onclick="createCategory()">Добавить</button>
         </div>
 
         <div class="tree" id="adminTree"></div>
@@ -213,30 +211,42 @@
 
         <div class="upload-zone">
           <div class="field">
-            <label>Название шаблона</label>
-            <input id="newTmplName" placeholder="Например: Исковое заявление о взыскании">
-          </div>
-          <div class="field">
-            <label>Категория</label>
-            <select id="newTmplCategory"><option value="">— выберите категорию —</option></select>
-          </div>
-          <div class="field">
-            <label>Группа документа</label>
-            <select id="newTmplGroup">
-              <option value="main">Основные (результат для клиента: иски, ходатайства, жалобы)</option>
-              <option value="service">Служебные (договор на оказание услуг, акты и т.п.)</option>
+            <label>1. Направление</label>
+            <select id="tmplWizBranch" onchange="onTmplWizBranchChange()">
+              <option value="">— выберите направление —</option>
+              <option value="svo">Участники СВО</option>
+              <option value="civil_admin">Гражданские и административные дела</option>
+              <option value="service">Служебные</option>
             </select>
           </div>
-          <div class="field">
-            <label>Описание (необязательно)</label>
-            <textarea id="newTmplDescription" rows="2" placeholder="Короткая заметка о шаблоне"></textarea>
+          <div class="field" id="tmplWizCategoryField" style="display:none;">
+            <label>2. Категория</label>
+            <select id="tmplWizCategory" onchange="onTmplWizCategoryChange()">
+              <option value="">— выберите категорию —</option>
+            </select>
           </div>
-          <div class="field">
-            <label>Файл .docx</label>
-            <input type="file" id="newTmplFile" accept=".docx">
+          <div class="field" id="tmplWizSubcategoryField" style="display:none;">
+            <label>3. Подкатегория</label>
+            <select id="tmplWizSubcategory" onchange="onTmplWizSubcategoryChange()">
+              <option value="">— выберите подкатегорию —</option>
+            </select>
           </div>
-          <button class="btn-primary" id="uploadTmplBtn" onclick="uploadTemplate()">Загрузить и найти поля</button>
-          <div class="login-error" id="uploadError" style="margin-top:10px;"></div>
+          <div id="tmplWizFinalFields" style="display:none;">
+            <div class="field">
+              <label>Название шаблона</label>
+              <input id="newTmplName" placeholder="Например: Исковое заявление о взыскании">
+            </div>
+            <div class="field">
+              <label>Описание (необязательно)</label>
+              <textarea id="newTmplDescription" rows="2" placeholder="Короткая заметка о шаблоне"></textarea>
+            </div>
+            <div class="field">
+              <label>Файл .docx</label>
+              <input type="file" id="newTmplFile" accept=".docx">
+            </div>
+            <button class="btn-primary" id="uploadTmplBtn" onclick="uploadTemplate()">Загрузить и найти поля</button>
+            <div class="login-error" id="uploadError" style="margin-top:10px;"></div>
+          </div>
         </div>
 
         <div class="table-wrap">
@@ -263,26 +273,56 @@
       <!-- ===== АДМИН: ПАКЕТЫ ===== -->
       <div class="screen" id="screen-admin-packages">
         <h1 class="page-title">Пакеты документов</h1>
-        <p class="page-sub">Наборы шаблонов, которые обычно генерируются вместе для одной категории дел</p>
+        <p class="page-sub">Наборы шаблонов, которые обычно генерируются вместе для одной подкатегории дел</p>
 
         <div class="upload-zone">
           <div class="field">
-            <label>Название пакета</label>
-            <input id="newPkgName" placeholder="Например: Увольнение со службы по состоянию здоровья">
+            <label>1. Направление</label>
+            <select id="pkgWizBranch" onchange="onPkgWizBranchChange()">
+              <option value="">— выберите направление —</option>
+              <option value="svo">Участники СВО</option>
+              <option value="civil_admin">Гражданские и административные дела</option>
+            </select>
           </div>
-          <div class="field">
-            <label>Категория</label>
-            <select id="newPkgCategory" onchange="onPkgCategoryChange()"><option value="">— выберите категорию —</option></select>
+          <div class="field" id="pkgWizCategoryField" style="display:none;">
+            <label>2. Категория</label>
+            <select id="pkgWizCategory" onchange="onPkgWizCategoryChange()">
+              <option value="">— выберите категорию —</option>
+            </select>
           </div>
-          <div class="field">
-            <label>Шаблоны в пакете</label>
-            <div id="newPkgTemplates" style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>
+          <div class="field" id="pkgWizSubcategoryField" style="display:none;">
+            <label>3. Подкатегория</label>
+            <select id="pkgWizSubcategory" onchange="onPkgWizSubcategoryChange()">
+              <option value="">— выберите подкатегорию —</option>
+            </select>
           </div>
-          <div style="display:flex;gap:8px;">
-            <button class="btn-primary" id="createPkgBtn" onclick="savePackage()">Создать пакет</button>
-            <button class="btn" id="cancelPkgEditBtn" style="display:none;" onclick="resetPackageForm()">Отменить редактирование</button>
+
+          <div id="pkgWizFinalFields" style="display:none;">
+            <div class="field">
+              <label>Название пакета</label>
+              <input id="newPkgName" placeholder="Например: Увольнение со службы по состоянию здоровья">
+            </div>
+            <div class="field">
+              <label>Шаблоны этой подкатегории</label>
+              <div id="pkgWizOwnTemplates" style="color:var(--muted);font-size:13px;"></div>
+            </div>
+            <div class="field">
+              <label>Добавить шаблон из другой категории</label>
+              <select id="pkgWizAddOther" onchange="onPkgWizAddOtherTemplate(this)">
+                <option value="">— выберите шаблон —</option>
+              </select>
+              <div id="pkgWizAddedOther" style="margin-top:8px;"></div>
+            </div>
+            <div class="field">
+              <label>Общие (служебные) шаблоны</label>
+              <div id="pkgWizUniversalTemplates" style="color:var(--muted);font-size:13px;"></div>
+            </div>
+            <div style="display:flex;gap:8px;">
+              <button class="btn-primary" id="createPkgBtn" onclick="savePackage()">Создать пакет</button>
+              <button class="btn" id="cancelPkgEditBtn" style="display:none;" onclick="resetPackageForm()">Отменить редактирование</button>
+            </div>
+            <div class="login-error" id="newPkgError" style="margin-top:10px;"></div>
           </div>
-          <div class="login-error" id="newPkgError" style="margin-top:10px;"></div>
         </div>
 
         <div class="table-wrap">
@@ -299,6 +339,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=8"></script>
+<script src="app.js?v=9"></script>
 </body>
 </html>

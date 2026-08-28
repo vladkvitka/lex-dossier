@@ -586,19 +586,37 @@ function onPkgCategoryChange(){
     box.innerHTML = '<div style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>';
     return;
   }
+  const universalIds = universalCategoryIds();
   const inCategory = state.templates.filter(t => t.category_id === catId);
-  if (!inCategory.length){
+  const fromUniversal = state.templates.filter(t => universalIds.has(t.category_id) && t.category_id !== catId);
+
+  if (!inCategory.length && !fromUniversal.length){
     box.innerHTML = '<div style="color:var(--muted);font-size:13px;">В этой категории пока нет шаблонов</div>';
     return;
   }
   const checkedIds = editingPackageId
     ? new Set((state.packages.find(p => p.id === editingPackageId)?.items || []).map(i => i.template_id))
     : new Set();
-  box.innerHTML = inCategory.map(t => `
-    <label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;">
-      <input type="checkbox" value="${t.id}" data-pkg-tmpl ${checkedIds.has(t.id) ? 'checked' : ''}> ${escapeHtml(t.name)}
-      ${t.status !== 'published' ? '<span class="badge badge-draft" style="margin-left:6px;">черновик</span>' : ''}
-    </label>`).join('');
+
+  function renderList(items){
+    return items.map(t => `
+      <label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;">
+        <input type="checkbox" value="${t.id}" data-pkg-tmpl ${checkedIds.has(t.id) ? 'checked' : ''}> ${escapeHtml(t.name)}
+        ${t.status !== 'published' ? '<span class="badge badge-draft" style="margin-left:6px;">черновик</span>' : ''}
+      </label>`).join('');
+  }
+
+  let html = '';
+  html += inCategory.length
+    ? renderList(inCategory)
+    : '<div style="color:var(--muted);font-size:12.5px;padding:4px 0;">В этой категории пока нет шаблонов</div>';
+
+  if (fromUniversal.length){
+    html += `<div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:700;margin:12px 0 4px;">Общие шаблоны (доступны для любой категории)</div>`;
+    html += renderList(fromUniversal);
+  }
+
+  box.innerHTML = html;
 }
 
 function editPackage(packageId){

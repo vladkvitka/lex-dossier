@@ -24,6 +24,9 @@ class Category(Base):
     name = Column(String, nullable=False)
     sort_order = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
+    # Шаблоны из "общей" категории доступны при сборке пакета/дела для ЛЮБОЙ
+    # другой категории (например категория "Общие" с актом сдачи-приёмки).
+    is_universal = Column(Boolean, default=False)
 
 
 class Template(Base):
@@ -36,6 +39,9 @@ class Template(Base):
     source_file_path = Column(String, nullable=False)
     file_version = Column(Integer, default=1)
     status = Column(String, default="draft")
+    # "main" — основные документы (результат услуги: иски, ходатайства, жалобы),
+    # "service" — служебные (договор на оказание услуг, акты и т.п.)
+    doc_group = Column(String, default="main")
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

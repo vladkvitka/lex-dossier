@@ -147,40 +147,46 @@ async function loadCategories(){
   renderCategorySelects();
 }
 
+function categorySort(a, b){
+  return a.name.localeCompare(b.name, 'ru');
+}
+
+function topLevelCategoriesOfBranch(branch){
+  return state.categories.filter(c => c.branch === branch && !c.parent_id && c.is_active).sort(categorySort);
+}
+
+function subcategoriesOf(parentId){
+  return state.categories.filter(c => c.parent_id === parentId && c.is_active).sort(categorySort);
+}
+
+function serviceCategory(){
+  return state.categories.find(c => c.branch === 'service');
+}
+
 function renderCategoryTree(){
   const box = document.getElementById('adminTree');
-  if (!state.categories.length){
+  // В дереве показываем только направления СВО и гражданские — «Служебные»
+  // это системная категория без иерархии, ей место в библиотеке шаблонов.
+  const branchCats = state.categories.filter(c => c.branch === 'svo' || c.branch === 'civil_admin');
+  if (!branchCats.length){
     box.innerHTML = '<div class="tree-empty">Категорий пока нет — добавьте первую выше</div>';
     return;
   }
-  const byParent = {};
-  state.categories.forEach(c=>{
-    const p = c.parent_id || 'root';
-    (byParent[p] = byParent[p] || []).push(c);
-  });
   function categoryRow(c, depth){
     return `
       <div class="tree-row" style="padding-left:${12 + depth*20}px;">
-        <span class="tree-name">${escapeHtml(c.name)}${c.is_universal ? ' <span class="badge badge-published" style="margin-left:6px;">общая</span>' : ''}${!c.is_active ? ' <span style="color:var(--muted);">(неактивна)</span>' : ''}</span>
+        <span class="tree-name">${escapeHtml(c.name)}${!c.is_active ? ' <span style="color:var(--muted);">(неактивна)</span>' : ''}</span>
         <span class="row-actions">
-          <button class="icon-btn" onclick="toggleCategoryUniversal('${c.id}')" title="${c.is_universal ? 'Сделать обычной' : 'Сделать общей для всех категорий'}">${c.is_universal ? '★' : '☆'}</button>
           <button class="icon-btn" onclick="renameCategoryPrompt('${c.id}')" title="Переименовать">✎</button>
           <button class="icon-btn danger" onclick="deleteCategoryConfirm('${c.id}')" title="Удалить">🗑</button>
         </span>
       </div>
-      ${renderLevel(c.id, depth+1)}
+      ${subcategoriesOf(c.id).map(sub => categoryRow(sub, depth + 1)).join('')}
     `;
   }
-  function renderLevel(parentKey, depth){
-    const items = byParent[parentKey] || [];
-    return items.map(c => categoryRow(c, depth)).join('');
-  }
-  // Корневые категории группируем по направлению (branch), т.к. это два
-  // самостоятельных дерева — гражданские/административные дела и СВО.
-  const roots = byParent['root'] || [];
   const grouped = BRANCHES.map(b => ({
     ...b,
-    items: roots.filter(c => c.branch === b.value),
+    items: topLevelCategoriesOfBranch(b.value),
   })).filter(g => g.items.length);
 
   if (!grouped.length){
@@ -214,22 +220,6 @@ async function renameCategoryPrompt(categoryId){
   }
 }
 
-async function toggleCategoryUniversal(categoryId){
-  const category = state.categories.find(c => c.id === categoryId);
-  if (!category) return;
-  try {
-    await api(`/categories/${categoryId}`, {
-      method: 'PATCH',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ is_universal: !category.is_universal })
-    });
-    toast(category.is_universal ? 'Категория больше не общая' : 'Категория теперь общая для всех');
-    await loadCategories();
-  } catch (err){
-    toast('Ошибка: ' + err.message);
-  }
-}
-
 async function deleteCategoryConfirm(categoryId){
   const category = state.categories.find(c => c.id === categoryId);
   if (!category) return;
@@ -245,40 +235,83 @@ async function deleteCategoryConfirm(categoryId){
 }
 
 function renderCategorySelects(){
-  const opts = state.categories.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-  document.getElementById('newCatParent').innerHTML =
-    '<option value="">— без родителя, верхний уровень —</option>' + opts;
-  document.getElementById('newTmplCategory').innerHTML =
-    '<option value="">— выберите категорию —</option>' + opts;
+  // Список категорий для формы «Новое дело» — плоский список всех активных
+  // категорий СВО/гражданские (без подкатегорий отдельно — дело просто
+  // привязывается к конкретной категории/подкатегории напрямую).
+  const opts = state.categories
+    .filter(c => c.branch !== 'service')
+    .slice()
+    .sort(categorySort)
+    .map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`)
+    .join('');
   const caseCatSelect = document.getElementById('newCaseCategory');
   if (caseCatSelect){
     caseCatSelect.innerHTML = '<option value="">— выберите категорию —</option>' + opts;
   }
-  const pkgCatSelect = document.getElementById('newPkgCategory');
-  if (pkgCatSelect){
-    pkgCatSelect.innerHTML = '<option value="">— выберите категорию —</option>' + opts;
+  // Визарды категорий/шаблонов/пакетов сами перестраивают свои селекты по
+  // шагам (см. onCatWizBranchChange / onTmplWizBranchChange / onPkgWizBranchChange).
+}
+
+// ---------- визард создания категории ----------
+
+function onCatWizBranchChange(){
+  const branch = document.getElementById('catWizBranch').value;
+  const parentField = document.getElementById('catWizParentField');
+  const nameField = document.getElementById('catWizNameField');
+  const addBtn = document.getElementById('catWizAddBtn');
+  if (!branch){
+    parentField.style.display = 'none';
+    nameField.style.display = 'none';
+    addBtn.style.display = 'none';
+    return;
+  }
+  const parentSelect = document.getElementById('catWizParent');
+  const tops = topLevelCategoriesOfBranch(branch);
+  parentSelect.innerHTML = '<option value="new">— новая категория, верхний уровень —</option>' +
+    tops.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  parentSelect.value = 'new';
+  parentField.style.display = 'block';
+  nameField.style.display = 'block';
+  addBtn.style.display = 'inline-flex';
+  onCatWizParentChange();
+}
+
+function onCatWizParentChange(){
+  const isNew = document.getElementById('catWizParent').value === 'new';
+  const label = document.getElementById('catWizNameLabel');
+  const input = document.getElementById('catWizName');
+  if (isNew){
+    label.textContent = 'Название новой категории (верхний уровень)';
+    input.placeholder = 'ЖИЛИЩНЫЕ СПОРЫ';
+  } else {
+    label.textContent = 'Название новой подкатегории';
+    input.placeholder = 'Взыскание задолженности по ЖКХ';
   }
 }
 
 async function createCategory(){
-  const name = document.getElementById('newCatName').value.trim();
-  const branch = document.getElementById('newCatBranch').value;
-  const parentId = document.getElementById('newCatParent').value || null;
-  const isUniversal = document.getElementById('newCatUniversal').checked;
-  if (!name){ toast('Введите название категории'); return; }
+  const branch = document.getElementById('catWizBranch').value;
+  const parentValue = document.getElementById('catWizParent').value;
+  const isTopLevel = parentValue === 'new';
+  const parentId = isTopLevel ? null : parentValue;
+  let name = document.getElementById('catWizName').value.trim();
+
   if (!branch){ toast('Выберите направление'); return; }
-  const btn = document.getElementById('addCatBtn');
+  if (!name){ toast('Введите название'); return; }
+  if (isTopLevel) name = name.toUpperCase(); // категории верхнего уровня — капсом
+
+  const btn = document.getElementById('catWizAddBtn');
   btn.disabled = true;
   try {
     await api('/categories', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ name, branch, parent_id: parentId, sort_order: 0, is_universal: isUniversal })
+      body: JSON.stringify({ name, branch, parent_id: parentId, sort_order: 0 })
     });
-    document.getElementById('newCatName').value = '';
-    document.getElementById('newCatUniversal').checked = false;
-    toast('Категория добавлена');
+    document.getElementById('catWizName').value = '';
+    toast(isTopLevel ? 'Категория добавлена' : 'Подкатегория добавлена');
     await loadCategories();
+    onCatWizBranchChange(); // перестроим список категорий с учётом новой
   } catch (err){
     toast('Ошибка: ' + err.message);
   } finally {
@@ -360,16 +393,82 @@ function renderLawyerTemplates(){
     </tr>`).join('');
 }
 
+// ---------- визард создания шаблона ----------
+
+let tmplWizTargetCategoryId = null;
+
+function onTmplWizBranchChange(){
+  const branch = document.getElementById('tmplWizBranch').value;
+  const categoryField = document.getElementById('tmplWizCategoryField');
+  const subcategoryField = document.getElementById('tmplWizSubcategoryField');
+  const finalFields = document.getElementById('tmplWizFinalFields');
+  tmplWizTargetCategoryId = null;
+  categoryField.style.display = 'none';
+  subcategoryField.style.display = 'none';
+  finalFields.style.display = 'none';
+
+  if (!branch) return;
+
+  if (branch === 'service'){
+    const svc = serviceCategory();
+    if (!svc){
+      toast('Системная категория «Служебные» ещё не создана на сервере — выполните миграцию');
+      return;
+    }
+    tmplWizTargetCategoryId = svc.id;
+    finalFields.style.display = 'block';
+    return;
+  }
+
+  const categorySelect = document.getElementById('tmplWizCategory');
+  const tops = topLevelCategoriesOfBranch(branch);
+  categorySelect.innerHTML = '<option value="">— выберите категорию —</option>' +
+    tops.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  categoryField.style.display = 'block';
+}
+
+function onTmplWizCategoryChange(){
+  const categoryId = document.getElementById('tmplWizCategory').value;
+  const subcategoryField = document.getElementById('tmplWizSubcategoryField');
+  const finalFields = document.getElementById('tmplWizFinalFields');
+  tmplWizTargetCategoryId = null;
+  finalFields.style.display = 'none';
+
+  if (!categoryId){
+    subcategoryField.style.display = 'none';
+    return;
+  }
+  const subSelect = document.getElementById('tmplWizSubcategory');
+  const subs = subcategoriesOf(categoryId);
+  subSelect.innerHTML = '<option value="">— выберите подкатегорию —</option>' +
+    subs.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  subcategoryField.style.display = 'block';
+  if (!subs.length){
+    subSelect.innerHTML = '<option value="">— в этой категории пока нет подкатегорий, создайте на вкладке «Категории» —</option>';
+  }
+}
+
+function onTmplWizSubcategoryChange(){
+  const subcategoryId = document.getElementById('tmplWizSubcategory').value;
+  const finalFields = document.getElementById('tmplWizFinalFields');
+  if (!subcategoryId){
+    tmplWizTargetCategoryId = null;
+    finalFields.style.display = 'none';
+    return;
+  }
+  tmplWizTargetCategoryId = subcategoryId;
+  finalFields.style.display = 'block';
+}
+
 async function uploadTemplate(){
   const name = document.getElementById('newTmplName').value.trim();
-  const categoryId = document.getElementById('newTmplCategory').value;
   const description = document.getElementById('newTmplDescription').value.trim();
   const fileInput = document.getElementById('newTmplFile');
   const errBox = document.getElementById('uploadError');
   errBox.style.display = 'none';
 
-  if (!name || !categoryId || !fileInput.files.length){
-    errBox.textContent = 'Заполните название, категорию и выберите файл .docx';
+  if (!name || !tmplWizTargetCategoryId || !fileInput.files.length){
+    errBox.textContent = 'Заполните название, пройдите шаги направления/категории и выберите файл .docx';
     errBox.style.display = 'block';
     return;
   }
@@ -381,8 +480,7 @@ async function uploadTemplate(){
   try {
     const form = new FormData();
     form.append('name', name);
-    form.append('category_id', categoryId);
-    form.append('doc_group', document.getElementById('newTmplGroup').value);
+    form.append('category_id', tmplWizTargetCategoryId);
     if (description) form.append('description', description);
     form.append('file', fileInput.files[0]);
 
@@ -554,11 +652,8 @@ async function deleteTemplateField(fieldId){
 // ---------- пакеты ----------
 
 let editingPackageId = null;
-
-async function loadAllPackages(){
-  state.packages = await api('/packages');
-  renderAdminPackagesTable();
-}
+let pkgWizTargetSubcategoryId = null;
+let pkgWizManuallyAdded = new Set(); // id шаблонов, добавленных вручную из другой категории
 
 function renderAdminPackagesTable(){
   const body = document.getElementById('adminPkgBody');
@@ -579,44 +674,146 @@ function renderAdminPackagesTable(){
     </tr>`).join('');
 }
 
-function onPkgCategoryChange(){
-  const catId = document.getElementById('newPkgCategory').value;
-  const box = document.getElementById('newPkgTemplates');
-  if (!catId){
-    box.innerHTML = '<div style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>';
-    return;
-  }
-  const universalIds = universalCategoryIds();
-  const inCategory = state.templates.filter(t => t.category_id === catId);
-  const fromUniversal = state.templates.filter(t => universalIds.has(t.category_id) && t.category_id !== catId);
+async function loadAllPackages(){
+  state.packages = await api('/packages');
+  renderAdminPackagesTable();
+}
 
-  if (!inCategory.length && !fromUniversal.length){
-    box.innerHTML = '<div style="color:var(--muted);font-size:13px;">В этой категории пока нет шаблонов</div>';
+// ---------- визард создания пакета ----------
+
+function onPkgWizBranchChange(){
+  const branch = document.getElementById('pkgWizBranch').value;
+  document.getElementById('pkgWizCategoryField').style.display = 'none';
+  document.getElementById('pkgWizSubcategoryField').style.display = 'none';
+  document.getElementById('pkgWizFinalFields').style.display = 'none';
+  pkgWizTargetSubcategoryId = null;
+  if (!branch) return;
+
+  const categorySelect = document.getElementById('pkgWizCategory');
+  const tops = topLevelCategoriesOfBranch(branch);
+  categorySelect.innerHTML = '<option value="">— выберите категорию —</option>' +
+    tops.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  document.getElementById('pkgWizCategoryField').style.display = 'block';
+}
+
+function onPkgWizCategoryChange(){
+  const categoryId = document.getElementById('pkgWizCategory').value;
+  document.getElementById('pkgWizSubcategoryField').style.display = 'none';
+  document.getElementById('pkgWizFinalFields').style.display = 'none';
+  pkgWizTargetSubcategoryId = null;
+  if (!categoryId) return;
+
+  const subSelect = document.getElementById('pkgWizSubcategory');
+  const subs = subcategoriesOf(categoryId);
+  subSelect.innerHTML = '<option value="">— выберите подкатегорию —</option>' +
+    subs.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  document.getElementById('pkgWizSubcategoryField').style.display = 'block';
+}
+
+function onPkgWizSubcategoryChange(){
+  const subcategoryId = document.getElementById('pkgWizSubcategory').value;
+  if (!subcategoryId){
+    document.getElementById('pkgWizFinalFields').style.display = 'none';
+    pkgWizTargetSubcategoryId = null;
     return;
   }
+  pkgWizTargetSubcategoryId = subcategoryId;
+  pkgWizManuallyAdded = new Set();
+  renderPkgWizTemplateLists();
+  document.getElementById('pkgWizFinalFields').style.display = 'block';
+}
+
+function pkgTemplateRow(t, checked){
+  return `
+    <label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;" data-pkg-row="${t.id}">
+      <input type="checkbox" value="${t.id}" data-pkg-tmpl ${checked ? 'checked' : ''}> ${escapeHtml(t.name)}
+      ${t.status !== 'published' ? '<span class="badge badge-draft" style="margin-left:6px;">черновик</span>' : ''}
+    </label>`;
+}
+
+function renderPkgWizTemplateLists(){
+  if (!pkgWizTargetSubcategoryId) return;
+  const universalIds = universalCategoryIds();
   const checkedIds = editingPackageId
     ? new Set((state.packages.find(p => p.id === editingPackageId)?.items || []).map(i => i.template_id))
-    : new Set();
+    : null; // null = отмечать всё по умолчанию (новый пакет)
 
-  function renderList(items){
-    return items.map(t => `
-      <label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;">
-        <input type="checkbox" value="${t.id}" data-pkg-tmpl ${checkedIds.has(t.id) ? 'checked' : ''}> ${escapeHtml(t.name)}
-        ${t.status !== 'published' ? '<span class="badge badge-draft" style="margin-left:6px;">черновик</span>' : ''}
-      </label>`).join('');
+  const ownTemplates = state.templates.filter(t => t.category_id === pkgWizTargetSubcategoryId);
+  const universalTemplates = state.templates.filter(t => universalIds.has(t.category_id));
+  const ownIds = new Set(ownTemplates.map(t => t.id));
+  const universalIdSet = new Set(universalTemplates.map(t => t.id));
+
+  const ownBox = document.getElementById('pkgWizOwnTemplates');
+  ownBox.innerHTML = ownTemplates.length
+    ? ownTemplates.map(t => pkgTemplateRow(t, checkedIds ? checkedIds.has(t.id) : true)).join('')
+    : '<div style="color:var(--muted);font-size:12.5px;">В этой подкатегории пока нет шаблонов</div>';
+
+  const universalBox = document.getElementById('pkgWizUniversalTemplates');
+  universalBox.innerHTML = universalTemplates.length
+    ? universalTemplates.map(t => pkgTemplateRow(t, checkedIds ? checkedIds.has(t.id) : true)).join('')
+    : '<div style="color:var(--muted);font-size:12.5px;">Общих (служебных) шаблонов пока нет</div>';
+
+  // При редактировании существующего пакета — шаблоны, не входящие ни в
+  // «свои», ни в «общие» (были добавлены вручную из другой категории),
+  // сразу показываем в блоке «добавлено вручную».
+  const addedBox = document.getElementById('pkgWizAddedOther');
+  addedBox.innerHTML = '';
+  pkgWizManuallyAdded = new Set();
+  if (checkedIds){
+    checkedIds.forEach(id => {
+      if (!ownIds.has(id) && !universalIdSet.has(id)){
+        const t = state.templates.find(x => x.id === id);
+        if (t){
+          pkgWizManuallyAdded.add(id);
+          addedBox.insertAdjacentHTML('beforeend', pkgManualRow(t));
+        }
+      }
+    });
   }
 
-  let html = '';
-  html += inCategory.length
-    ? renderList(inCategory)
-    : '<div style="color:var(--muted);font-size:12.5px;padding:4px 0;">В этой категории пока нет шаблонов</div>';
+  renderPkgWizAddOtherSelect();
+}
 
-  if (fromUniversal.length){
-    html += `<div style="font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:700;margin:12px 0 4px;">Общие шаблоны (доступны для любой категории)</div>`;
-    html += renderList(fromUniversal);
-  }
+function pkgManualRow(t){
+  return `
+    <label style="display:flex;align-items:center;gap:9px;padding:5px 0;font-size:13.5px;" data-pkg-manual-row="${t.id}">
+      <input type="checkbox" value="${t.id}" data-pkg-tmpl checked> ${escapeHtml(t.name)}
+      <span style="color:var(--muted);">— ${escapeHtml(categoryName(t.category_id))}</span>
+      <button type="button" class="icon-btn danger" style="margin-left:auto;" onclick="removePkgManualTemplate('${t.id}')">✕</button>
+    </label>`;
+}
 
-  box.innerHTML = html;
+function renderPkgWizAddOtherSelect(){
+  const select = document.getElementById('pkgWizAddOther');
+  const universalIds = universalCategoryIds();
+  const exclude = new Set([
+    ...state.templates.filter(t => t.category_id === pkgWizTargetSubcategoryId).map(t => t.id),
+    ...state.templates.filter(t => universalIds.has(t.category_id)).map(t => t.id),
+    ...pkgWizManuallyAdded,
+  ]);
+  const options = state.templates
+    .filter(t => !exclude.has(t.id))
+    .slice()
+    .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+  select.innerHTML = '<option value="">— выберите шаблон —</option>' +
+    options.map(t => `<option value="${t.id}">${escapeHtml(t.name)} — ${escapeHtml(categoryName(t.category_id))}</option>`).join('');
+}
+
+function onPkgWizAddOtherTemplate(select){
+  const templateId = select.value;
+  if (!templateId) return;
+  const t = state.templates.find(x => x.id === templateId);
+  if (!t) return;
+  pkgWizManuallyAdded.add(templateId);
+  document.getElementById('pkgWizAddedOther').insertAdjacentHTML('beforeend', pkgManualRow(t));
+  renderPkgWizAddOtherSelect();
+}
+
+function removePkgManualTemplate(templateId){
+  pkgWizManuallyAdded.delete(templateId);
+  const row = document.querySelector(`[data-pkg-manual-row="${templateId}"]`);
+  if (row) row.remove();
+  renderPkgWizAddOtherSelect();
 }
 
 function editPackage(packageId){
@@ -624,8 +821,18 @@ function editPackage(packageId){
   if (!pkg) return;
   editingPackageId = packageId;
   document.getElementById('newPkgName').value = pkg.name;
-  document.getElementById('newPkgCategory').value = pkg.category_id;
-  onPkgCategoryChange();
+
+  const category = state.categories.find(c => c.id === pkg.category_id);
+  const topCategory = category && category.parent_id ? state.categories.find(c => c.id === category.parent_id) : category;
+  if (category && topCategory){
+    document.getElementById('pkgWizBranch').value = topCategory.branch;
+    onPkgWizBranchChange();
+    document.getElementById('pkgWizCategory').value = topCategory.id;
+    onPkgWizCategoryChange();
+    document.getElementById('pkgWizSubcategory').value = pkg.category_id;
+    onPkgWizSubcategoryChange();
+  }
+
   document.getElementById('createPkgBtn').textContent = 'Сохранить изменения';
   document.getElementById('cancelPkgEditBtn').style.display = 'inline-block';
   switchNav('admin-packages', document.querySelector('[data-nav=admin-packages]'));
@@ -634,22 +841,23 @@ function editPackage(packageId){
 
 function resetPackageForm(){
   editingPackageId = null;
+  pkgWizManuallyAdded = new Set();
   document.getElementById('newPkgName').value = '';
-  document.getElementById('newPkgCategory').value = '';
-  document.getElementById('newPkgTemplates').innerHTML = '<div style="color:var(--muted);font-size:13px;">Сначала выберите категорию</div>';
+  document.getElementById('pkgWizBranch').value = '';
+  onPkgWizBranchChange();
   document.getElementById('createPkgBtn').textContent = 'Создать пакет';
   document.getElementById('cancelPkgEditBtn').style.display = 'none';
 }
 
 async function savePackage(){
   const name = document.getElementById('newPkgName').value.trim();
-  const categoryId = document.getElementById('newPkgCategory').value;
-  const templateIds = Array.from(document.querySelectorAll('#newPkgTemplates [data-pkg-tmpl]:checked')).map(el => el.value);
+  const categoryId = pkgWizTargetSubcategoryId;
+  const templateIds = Array.from(document.querySelectorAll('#pkgWizFinalFields [data-pkg-tmpl]:checked')).map(el => el.value);
   const errBox = document.getElementById('newPkgError');
   errBox.style.display = 'none';
 
   if (!name || !categoryId || !templateIds.length){
-    errBox.textContent = 'Укажите название, категорию и выберите хотя бы один шаблон';
+    errBox.textContent = 'Укажите название, пройдите шаги направления/категории/подкатегории и выберите хотя бы один шаблон';
     errBox.style.display = 'block';
     return;
   }

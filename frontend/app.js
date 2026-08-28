@@ -161,8 +161,9 @@ function renderCategoryTree(){
   function categoryRow(c, depth){
     return `
       <div class="tree-row" style="padding-left:${12 + depth*20}px;">
-        <span class="tree-name">${escapeHtml(c.name)}${!c.is_active ? ' <span style="color:var(--muted);">(неактивна)</span>' : ''}</span>
+        <span class="tree-name">${escapeHtml(c.name)}${c.is_universal ? ' <span class="badge badge-published" style="margin-left:6px;">общая</span>' : ''}${!c.is_active ? ' <span style="color:var(--muted);">(неактивна)</span>' : ''}</span>
         <span class="row-actions">
+          <button class="icon-btn" onclick="toggleCategoryUniversal('${c.id}')" title="${c.is_universal ? 'Сделать обычной' : 'Сделать общей для всех категорий'}">${c.is_universal ? '★' : '☆'}</button>
           <button class="icon-btn" onclick="renameCategoryPrompt('${c.id}')" title="Переименовать">✎</button>
           <button class="icon-btn danger" onclick="deleteCategoryConfirm('${c.id}')" title="Удалить">🗑</button>
         </span>
@@ -213,6 +214,22 @@ async function renameCategoryPrompt(categoryId){
   }
 }
 
+async function toggleCategoryUniversal(categoryId){
+  const category = state.categories.find(c => c.id === categoryId);
+  if (!category) return;
+  try {
+    await api(`/categories/${categoryId}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ is_universal: !category.is_universal })
+    });
+    toast(category.is_universal ? 'Категория больше не общая' : 'Категория теперь общая для всех');
+    await loadCategories();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
 async function deleteCategoryConfirm(categoryId){
   const category = state.categories.find(c => c.id === categoryId);
   if (!category) return;
@@ -247,6 +264,7 @@ async function createCategory(){
   const name = document.getElementById('newCatName').value.trim();
   const branch = document.getElementById('newCatBranch').value;
   const parentId = document.getElementById('newCatParent').value || null;
+  const isUniversal = document.getElementById('newCatUniversal').checked;
   if (!name){ toast('Введите название категории'); return; }
   if (!branch){ toast('Выберите направление'); return; }
   const btn = document.getElementById('addCatBtn');
@@ -255,9 +273,10 @@ async function createCategory(){
     await api('/categories', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ name, branch, parent_id: parentId, sort_order: 0 })
+      body: JSON.stringify({ name, branch, parent_id: parentId, sort_order: 0, is_universal: isUniversal })
     });
     document.getElementById('newCatName').value = '';
+    document.getElementById('newCatUniversal').checked = false;
     toast('Категория добавлена');
     await loadCategories();
   } catch (err){
@@ -265,6 +284,10 @@ async function createCategory(){
   } finally {
     btn.disabled = false;
   }
+}
+
+function universalCategoryIds(){
+  return new Set(state.categories.filter(c => c.is_universal).map(c => c.id));
 }
 
 // ---------- шаблоны ----------
@@ -280,6 +303,10 @@ function categoryName(id){
   return c ? c.name : '—';
 }
 
+function docGroupLabel(group){
+  return group === 'service' ? 'Служебный' : 'Основной';
+}
+
 function renderAdminTemplates(){
   const body = document.getElementById('adminTmplBody');
   if (!body) return;
@@ -291,7 +318,7 @@ function renderAdminTemplates(){
     const published = t.status === 'published';
     return `
       <tr>
-        <td>${escapeHtml(t.name)}</td>
+        <td>${escapeHtml(t.name)}<br><span style="font-size:11px;color:var(--muted);">${docGroupLabel(t.doc_group)}</span></td>
         <td>${escapeHtml(categoryName(t.category_id))}</td>
         <td><span class="badge ${published ? 'badge-published' : 'badge-draft'}">${published ? 'Опубликован' : 'Черновик'}</span></td>
         <td style="text-align:right;white-space:nowrap;">
@@ -355,6 +382,7 @@ async function uploadTemplate(){
     const form = new FormData();
     form.append('name', name);
     form.append('category_id', categoryId);
+    form.append('doc_group', document.getElementById('newTmplGroup').value);
     if (description) form.append('description', description);
     form.append('file', fileInput.files[0]);
 
@@ -393,6 +421,7 @@ const FIELD_TYPES = [
   { value: 'number', label: 'Число' },
   { value: 'money', label: 'Денежная сумма' },
   { value: 'select', label: 'Выбор из списка' },
+  { value: 'documents_list', label: '⚙ Список документов дела (заполняется автоматически)' },
 ];
 
 async function openTemplateFields(id){
@@ -428,21 +457,33 @@ function renderFieldsForm(fields){
       </div>
       <div class="field">
         <label>Тип поля</label>
-        <select data-fe="field_type">
+        <select data-fe="field_type" onchange="onFieldTypeChange(this)">
           ${FIELD_TYPES.map(t => `<option value="${t.value}" ${t.value===f.field_type?'selected':''}>${t.label}</option>`).join('')}
         </select>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px;">
-        <input type="checkbox" data-fe="is_required" ${f.is_required ? 'checked' : ''}> Обязательное поле
-      </label>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px;">
-        <input type="checkbox" data-fe="is_shared" ${f.is_shared ? 'checked' : ''} onchange="onSharedToggle(this)"> Общее для пакета (одно значение для нескольких документов)
-      </label>
-      <div class="field" data-shared-key-field style="display:${f.is_shared ? 'block' : 'none'};margin-bottom:0;">
-        <label>Ключ группировки общего поля</label>
-        <input data-fe="shared_group_key" value="${escapeHtml(f.shared_group_key || '')}" placeholder="например: фио_доверителя">
+      <div class="notice" data-doclist-note style="display:${f.field_type === 'documents_list' ? 'block' : 'none'};">
+        Это служебное поле — юрист его не заполняет. При генерации сюда автоматически подставится нумерованный перечень «основных» документов, отмеченных для этого дела в текущем запуске генерации.
+      </div>
+      <div data-normal-field-options style="display:${f.field_type === 'documents_list' ? 'none' : 'block'};">
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px;">
+          <input type="checkbox" data-fe="is_required" ${f.is_required ? 'checked' : ''}> Обязательное поле
+        </label>
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;margin-bottom:10px;">
+          <input type="checkbox" data-fe="is_shared" ${f.is_shared ? 'checked' : ''} onchange="onSharedToggle(this)"> Общее для пакета (одно значение для нескольких документов)
+        </label>
+        <div class="field" data-shared-key-field style="display:${f.is_shared ? 'block' : 'none'};margin-bottom:0;">
+          <label>Ключ группировки общего поля</label>
+          <input data-fe="shared_group_key" value="${escapeHtml(f.shared_group_key || '')}" placeholder="например: фио_доверителя">
+        </div>
       </div>
     </div>`).join('');
+}
+
+function onFieldTypeChange(select){
+  const row = select.closest('[data-field-row]');
+  const isDocList = select.value === 'documents_list';
+  row.querySelector('[data-doclist-note]').style.display = isDocList ? 'block' : 'none';
+  row.querySelector('[data-normal-field-options]').style.display = isDocList ? 'none' : 'block';
 }
 
 function onSharedToggle(checkbox){
@@ -755,9 +796,11 @@ async function openCase(caseId){
       categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status) +
       (currentCase.created_by_email ? ' · автор: ' + currentCase.created_by_email : '');
 
-    // Список опубликованных шаблонов в категории дела, доступных для выбора
+    // Список опубликованных шаблонов, доступных для выбора: своя категория
+    // дела + шаблоны из «общих» категорий (is_universal), которые годятся
+    // для любой категории.
     if (!state.templates.length) await loadTemplates();
-    const available = state.templates.filter(t => t.category_id === currentCase.category_id && t.status === 'published');
+    const available = currentAvailableTemplates();
 
     renderCaseTemplatesBox(available);
     await renderCaseFieldsForm(available);
@@ -806,25 +849,41 @@ async function deleteCurrentCase(){
 }
 
 function renderCaseTemplatesBox(available){
-  const box = document.getElementById('caseTemplatesBox');
-  if (!available.length){
-    box.innerHTML = '<div style="color:var(--muted);">В этой категории пока нет опубликованных шаблонов</div>';
-    return;
+  const mainBox = document.getElementById('caseTemplatesBoxMain');
+  const serviceBox = document.getElementById('caseTemplatesBoxService');
+
+  function renderGroup(box, items){
+    if (!items.length){
+      box.innerHTML = '<div style="color:var(--muted);font-size:13px;">Нет доступных шаблонов</div>';
+      return;
+    }
+    box.innerHTML = items.map(t => `
+      <label style="display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13.5px;">
+        <input type="checkbox" value="${t.id}" ${currentCaseSelectedTemplates.has(t.id) ? 'checked' : ''}
+          onchange="onCaseTemplateToggle()">
+        ${escapeHtml(t.name)}
+      </label>`).join('');
   }
-  box.innerHTML = available.map(t => `
-    <label style="display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13.5px;">
-      <input type="checkbox" value="${t.id}" ${currentCaseSelectedTemplates.has(t.id) ? 'checked' : ''}
-        onchange="onCaseTemplateToggle()">
-      ${escapeHtml(t.name)}
-    </label>`).join('');
+
+  renderGroup(mainBox, available.filter(t => t.doc_group !== 'service'));
+  renderGroup(serviceBox, available.filter(t => t.doc_group === 'service'));
+}
+
+function currentAvailableTemplates(){
+  if (!currentCase) return [];
+  const universalIds = universalCategoryIds();
+  return state.templates.filter(t =>
+    t.status === 'published' &&
+    (t.category_id === currentCase.category_id || universalIds.has(t.category_id))
+  );
 }
 
 async function onCaseTemplateToggle(){
-  const boxes = document.querySelectorAll('#caseTemplatesBox input[type=checkbox]');
+  const boxes = document.querySelectorAll('#caseTemplatesBoxMain input[type=checkbox], #caseTemplatesBoxService input[type=checkbox]');
   currentCaseSelectedTemplates = new Set(
     Array.from(boxes).filter(b => b.checked).map(b => b.value)
   );
-  const available = state.templates.filter(t => t.category_id === currentCase.category_id && t.status === 'published');
+  const available = currentAvailableTemplates();
   await renderCaseFieldsForm(available);
   renderCaseDocTabs(available);
 }
@@ -848,6 +907,7 @@ async function renderCaseFieldsForm(available){
   for (const t of selected){
     const detail = await api(`/templates/${t.id}`);
     for (const f of detail.fields){
+      if (f.field_type === 'documents_list') continue; // заполняется автоматически, в форму не выводим
       const groupKey = (f.is_shared && f.shared_group_key) ? f.shared_group_key : f.field_key;
       if (!fieldsByGroupKey.has(groupKey)) fieldsByGroupKey.set(groupKey, f);
     }
@@ -896,11 +956,15 @@ let isEditingDoc = false;
 let lastPreviewParagraphs = [];   // текущие абзацы активной вкладки (как пришли с сервера)
 let lastPreviewHasManualEdit = false;
 
+let currentDocGroup = 'main';   // активная вкладка верхнего уровня: 'main' | 'service'
+
 function renderCaseDocTabs(available){
+  const groupTabsBox = document.getElementById('docGroupTabs');
   const tabsBox = document.getElementById('docTabs');
   const selected = available.filter(t => currentCaseSelectedTemplates.has(t.id));
 
   if (!selected.length){
+    groupTabsBox.innerHTML = '';
     tabsBox.innerHTML = '';
     document.getElementById('docPreviewTitle').textContent = '—';
     document.getElementById('docBody').innerHTML = '<div class="doc-body-empty">Отметьте документ слева, чтобы увидеть предпросмотр</div>';
@@ -909,17 +973,44 @@ function renderCaseDocTabs(available){
     return;
   }
 
-  if (!currentDocTabId || !selected.some(t => t.id === currentDocTabId)){
-    currentDocTabId = selected[0].id;
+  const groups = [
+    { value: 'main', label: 'Основные', items: selected.filter(t => t.doc_group !== 'service') },
+    { value: 'service', label: 'Служебные', items: selected.filter(t => t.doc_group === 'service') },
+  ].filter(g => g.items.length);
+
+  if (!groups.some(g => g.value === currentDocGroup)){
+    currentDocGroup = groups[0].value;
+  }
+  const activeGroup = groups.find(g => g.value === currentDocGroup);
+
+  groupTabsBox.innerHTML = groups.length > 1
+    ? groups.map(g => `
+        <div class="doc-tab ${g.value === currentDocGroup ? 'active' : ''}" onclick="selectDocGroup('${g.value}')">
+          ${escapeHtml(g.label)}
+        </div>`).join('')
+    : '';
+
+  if (!currentDocTabId || !activeGroup.items.some(t => t.id === currentDocTabId)){
+    currentDocTabId = activeGroup.items[0].id;
   }
 
-  tabsBox.innerHTML = selected.map(t => `
+  tabsBox.innerHTML = activeGroup.items.map(t => `
     <div class="doc-tab ${t.id === currentDocTabId ? 'active' : ''}" data-doc="${t.id}" onclick="selectDocTab('${t.id}')">
       <span class="dot"></span>${escapeHtml(t.name)}
     </div>`).join('');
 
   isEditingDoc = false;
   refreshPreview();
+}
+
+function selectDocGroup(groupValue){
+  if (isEditingDoc){
+    const ok = window.confirm('Несохранённые правки этого документа будут потеряны. Переключиться на другую группу?');
+    if (!ok) return;
+  }
+  currentDocGroup = groupValue;
+  currentDocTabId = null; // выбор конкретного документа заново — из первого в группе
+  renderCaseDocTabs(currentAvailableTemplates());
 }
 
 function selectDocTab(templateId){
@@ -929,7 +1020,7 @@ function selectDocTab(templateId){
   }
   currentDocTabId = templateId;
   isEditingDoc = false;
-  document.querySelectorAll('.doc-tab').forEach(el => el.classList.toggle('active', el.dataset.doc === templateId));
+  document.querySelectorAll('#docTabs .doc-tab').forEach(el => el.classList.toggle('active', el.dataset.doc === templateId));
   refreshPreview();
 }
 
@@ -972,7 +1063,11 @@ async function refreshPreview(){
     const result = await api(`/cases/${currentCase.id}/preview`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ template_id: currentDocTabId, values })
+      body: JSON.stringify({
+        template_id: currentDocTabId,
+        values,
+        selected_template_ids: Array.from(currentCaseSelectedTemplates)
+      })
     });
     lastPreviewParagraphs = result.paragraphs;
     lastPreviewHasManualEdit = result.has_manual_edit;

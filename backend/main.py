@@ -224,15 +224,20 @@ def create_template(
     category_id: uuid.UUID = Form(...),
     name: str = Form(...),
     description: Optional[str] = Form(None),
-    doc_group: str = Form("main"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     current_user: models.User = Depends(require_admin),
 ):
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Файл должен быть в формате .docx")
-    if doc_group not in ("main", "service"):
-        raise HTTPException(status_code=400, detail="Группа документа должна быть 'main' или 'service'")
+
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    # Группа документа больше не выбирается вручную — она однозначно
+    # определяется направлением категории: "service" -> служебный,
+    # СВО/гражданские -> основной.
+    doc_group = "service" if category.branch == "service" else "main"
 
     template_id = uuid.uuid4()
     template_dir = os.path.join(STORAGE_TEMPLATES_DIR, str(template_id))

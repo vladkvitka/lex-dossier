@@ -101,6 +101,9 @@ tr:last-child td{border-bottom:none;}
 /* ---------- карточка дела: две колонки ---------- */
 .case-columns{display:grid;grid-template-columns:minmax(320px,420px) 1fr;gap:24px;align-items:start;}
 
+.doc-group-columns{display:grid;grid-template-columns:1fr 1fr;gap:14px;}
+.doc-group-label{font-size:11px;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);font-weight:700;margin-bottom:6px;}
+
 /* ---------- предпросмотр документа (по образцу прототипа) ---------- */
 .doc-tabs{display:flex;gap:3px;margin-bottom:0;flex-wrap:wrap;}
 .doc-tab{padding:9px 14px 8px;font-size:12px;font-weight:600;color:var(--muted);background:var(--surface-alt);border:1px solid var(--border);border-bottom:none;border-radius:8px 8px 0 0;cursor:pointer;position:relative;top:1px;}
@@ -126,4 +129,5 @@ tr:last-child td{border-bottom:none;}
 @media(max-width:960px){
   .sidenav{display:none;}
   .case-columns{grid-template-columns:1fr;}
+  .doc-group-columns{grid-template-columns:1fr;}
 }

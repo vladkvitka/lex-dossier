@@ -85,24 +85,42 @@
       <!-- ===== НОВОЕ ДЕЛО ===== -->
       <div class="screen" id="screen-case-new">
         <h1 class="page-title">Новое дело</h1>
-        <p class="page-sub">Укажите клиента и категорию — дальше выберете документы и заполните данные</p>
+        <p class="page-sub">Направление → категория → подкатегория — дальше клиент, пакет документов и создание дела</p>
         <button class="btn" style="margin-bottom:16px;" onclick="switchNav('cases-list', null)">← К списку дел</button>
         <div class="upload-zone">
           <div class="field">
-            <label>Имя клиента</label>
-            <input id="newCaseClient" placeholder="Например: Иванов Иван Иванович">
-          </div>
-          <div class="field">
-            <label>Категория</label>
-            <select id="newCaseCategory" onchange="onNewCaseCategoryChange()"><option value="">— выберите категорию —</option></select>
-          </div>
-          <div class="field" id="newCasePackageField" style="display:none;">
-            <label>Пакет документов (необязательно)</label>
-            <select id="newCasePackage">
-              <option value="">— без пакета, выберу документы вручную —</option>
+            <label>1. Направление</label>
+            <select id="newCaseBranch" onchange="onNewCaseBranchChange()">
+              <option value="">— выберите направление —</option>
+              <option value="svo">Участники СВО</option>
+              <option value="civil_admin">Гражданские и административные дела</option>
             </select>
           </div>
-          <button class="btn-primary" id="createCaseBtn" onclick="createCase()">Создать дело</button>
+          <div class="field" id="newCaseCategoryField" style="display:none;">
+            <label>2. Категория</label>
+            <select id="newCaseCategory" onchange="onNewCaseCategoryChange()">
+              <option value="">— выберите категорию —</option>
+            </select>
+          </div>
+          <div class="field" id="newCaseSubcategoryField" style="display:none;">
+            <label>3. Подкатегория</label>
+            <select id="newCaseSubcategory" onchange="onNewCaseSubcategoryChange()">
+              <option value="">— выберите подкатегорию —</option>
+            </select>
+          </div>
+          <div id="newCaseFinalFields" style="display:none;">
+            <div class="field">
+              <label>Имя клиента</label>
+              <input id="newCaseClient" placeholder="Например: Иванов Иван Иванович">
+            </div>
+            <div class="field" id="newCasePackageField" style="display:none;">
+              <label>Пакет документов (необязательно)</label>
+              <select id="newCasePackage">
+                <option value="">— без пакета, выберу документы вручную —</option>
+              </select>
+            </div>
+            <button class="btn-primary" id="createCaseBtn" onclick="createCase()">Создать дело</button>
+          </div>
           <div class="login-error" id="newCaseError" style="margin-top:10px;"></div>
         </div>
       </div>
@@ -136,8 +154,8 @@
             <div id="caseFormBox" style="display:none;">
               <h2 style="font-size:15px;margin:26px 0 10px;">Данные дела</h2>
               <div class="upload-zone" id="caseFieldsBox"></div>
-              <button class="btn-primary" onclick="saveCaseFields()">Сохранить данные</button>
-              <button class="btn-primary" onclick="generateDocuments()" style="margin-left:8px;">Сгенерировать документы</button>
+              <div style="color:var(--muted);font-size:12px;margin-bottom:8px;">Данные сохраняются автоматически по мере ввода</div>
+              <button class="btn-primary" id="generateDocsBtn" onclick="generateDocuments()">Сгенерировать документы</button>
               <div class="login-error" id="caseFormError" style="margin-top:10px;"></div>
             </div>
 
@@ -149,7 +167,10 @@
                   <tbody id="caseDocsBody"></tbody>
                 </table>
               </div>
-              <button class="btn-primary" style="margin-top:12px;" onclick="downloadAllCaseDocuments()">Скачать весь пакет (.zip)</button>
+              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
+                <button class="btn-primary" onclick="downloadAllCaseDocuments('docx')">Скачать пакет в docx</button>
+                <button class="btn-primary" onclick="downloadAllCaseDocuments('pdf')">Скачать пакет в PDF</button>
+              </div>
             </div>
           </div>
 
@@ -164,8 +185,6 @@
                   <button class="btn-primary btn-sm" id="docSaveEditBtn" style="display:none;" onclick="saveEditDoc()">Сохранить</button>
                   <button class="btn btn-sm" id="docCancelEditBtn" style="display:none;" onclick="cancelEditDoc()">Отмена</button>
                   <button class="btn btn-sm" id="docResetEditBtn" style="display:none;color:var(--wine);" onclick="resetEditDoc()">Сбросить правки</button>
-                  <button class="btn btn-sm" onclick="downloadActiveTabDoc('docx')">Скачать .docx</button>
-                  <button class="btn btn-sm" onclick="downloadActiveTabDoc('pdf')">Скачать .pdf</button>
                 </div>
               </div>
               <div class="doc-body" id="docBody"><div class="doc-body-empty">Отметьте документ слева, чтобы увидеть предпросмотр</div></div>
@@ -339,6 +358,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=9"></script>
+<script src="app.js?v=10"></script>
 </body>
 </html>

@@ -7,6 +7,7 @@ import tempfile
 import uuid
 import zipfile
 import io
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
@@ -610,6 +611,32 @@ def delete_package(
 
 # ---------- Дела ----------
 
+def _add_business_days(start: datetime, n: int) -> datetime:
+    """Прибавляет n рабочих дней (пропускает субботу/воскресенье)."""
+    result = start
+    added = 0
+    while added < n:
+        result += timedelta(days=1)
+        if result.weekday() < 5:  # 0..4 = пн..пт
+            added += 1
+    return result
+
+
+def _refresh_case_status(case: models.Case) -> bool:
+    """Ленивая (без крон-задачи) авто-архивация: если дело в работе и с
+    момента первой генерации прошло 4 рабочих дня — переводит в архив.
+    Возвращает True, если статус был изменён (вызывающий код должен
+    сделать commit). Статус draft/ready/archived, выставленные вручную,
+    не трогает."""
+    if case.status == "in_progress" and case.first_generated_at:
+        deadline = _add_business_days(case.first_generated_at, 4)
+        now = datetime.now(timezone.utc)
+        if now >= deadline:
+            case.status = "archived"
+            return True
+    return False
+
+
 def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
     field_values = (
         db.query(models.CaseFieldValue)
@@ -662,11 +689,16 @@ def list_cases(
         .all()
     )
     result = []
+    changed = False
     for case, creator_name, creator_email in rows:
+        if _refresh_case_status(case):
+            changed = True
         item = CaseOut.model_validate(case)
         item.created_by_name = creator_name
         item.created_by_email = creator_email
         result.append(item)
+    if changed:
+        db.commit()
     return result
 
 
@@ -708,6 +740,8 @@ def get_case(
     case = db.query(models.Case).filter(models.Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Дело не найдено")
+    if _refresh_case_status(case):
+        db.commit()
     return _case_to_detail(db, case)
 
 
@@ -724,6 +758,9 @@ def update_case(
     if data.client_name is not None:
         case.client_name = data.client_name
     if data.status is not None:
+        # Обычно статус выставляется автоматически (см. generate_documents и
+        # _refresh_case_status) — ручная установка через PATCH остаётся для
+        # редких случаев (например, админ хочет досрочно заархивировать).
         case.status = data.status
     db.commit()
     db.refresh(case)
@@ -916,6 +953,16 @@ def _apply_paragraph_texts(docx_path: str, texts: List[str]):
     doc.save(docx_path)
 
 
+def _strip_preview_markers(text: str) -> str:
+    """Убирает служебную разметку предпросмотра (⟪заполнено⟫ / ⟦не заполнено⟧),
+    если она случайно попала в текст ручной правки — иначе эти символы
+    утекают буквально в скачанный .docx. Фронтенд уже не должен их
+    показывать при редактировании, но это подстраховка на сервере."""
+    text = re.sub(r"⟪([^⟫]*)⟫", r"\1", text)
+    text = re.sub(r"⟦[^⟧]*⟧", "", text)
+    return text
+
+
 def _get_manual_edit(db: Session, case_id: uuid.UUID, template_id: uuid.UUID):
     return (
         db.query(models.CaseDocumentEdit)
@@ -953,6 +1000,13 @@ def generate_documents(
     case = db.query(models.Case).filter(models.Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    # Первое нажатие "Сгенерировать документы" переводит дело из черновика
+    # в работу и запускает отсчёт 4 рабочих дней до авто-архивации.
+    # Повторные нажатия (обновление уже сгенерированного пакета) статус не трогают.
+    if case.status == "draft":
+        case.status = "in_progress"
+        case.first_generated_at = datetime.now(timezone.utc)
 
     case_field_values = {
         f.field_key: (f.value or "")
@@ -992,7 +1046,15 @@ def generate_documents(
             lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
             context[f.field_key] = case_field_values.get(lookup_key, "")
 
-        document_id = uuid.uuid4()
+        # Если по этому шаблону в деле уже есть сгенерированный документ —
+        # это повторная генерация ("Обновить документы"): перезаписываем его
+        # файл и запись, а не плодим дубликаты в списке.
+        existing_doc = (
+            db.query(models.CaseDocument)
+            .filter(models.CaseDocument.case_id == case_id, models.CaseDocument.template_id == template_id)
+            .first()
+        )
+        document_id = existing_doc.id if existing_doc else uuid.uuid4()
         docx_path = os.path.join(case_dir, f"{document_id}.docx")
 
         try:
@@ -1021,15 +1083,26 @@ def generate_documents(
 
         pdf_path = _convert_to_pdf(docx_path, case_dir)
 
-        case_document = models.CaseDocument(
-            id=document_id,
-            case_id=case_id,
-            template_id=template_id,
-            docx_file_path=docx_path,
-            pdf_file_path=pdf_path,
-            generated_by=current_user.id,
-        )
-        db.add(case_document)
+        if existing_doc:
+            # Старый PDF (если путь отличается — не должен, т.к. document_id
+            # тот же, но на всякий случай подчищаем) и сама запись обновляются
+            # на месте — id документа не меняется, значит ссылки на него
+            # (например, в открытых вкладках фронта) остаются валидными.
+            existing_doc.docx_file_path = docx_path
+            existing_doc.pdf_file_path = pdf_path
+            existing_doc.generated_at = datetime.now(timezone.utc)
+            existing_doc.generated_by = current_user.id
+            case_document = existing_doc
+        else:
+            case_document = models.CaseDocument(
+                id=document_id,
+                case_id=case_id,
+                template_id=template_id,
+                docx_file_path=docx_path,
+                pdf_file_path=pdf_path,
+                generated_by=current_user.id,
+            )
+            db.add(case_document)
         created_docs.append((case_document, template.name))
 
     db.commit()
@@ -1129,7 +1202,8 @@ def save_document_edit(
         raise HTTPException(status_code=404, detail="Дело не найдено")
 
     existing = _get_manual_edit(db, case_id, data.template_id)
-    paragraphs_json = json.dumps(data.paragraphs, ensure_ascii=False)
+    clean_paragraphs = [_strip_preview_markers(p) for p in data.paragraphs]
+    paragraphs_json = json.dumps(clean_paragraphs, ensure_ascii=False)
     if existing:
         existing.paragraphs_json = paragraphs_json
     else:
@@ -1140,7 +1214,7 @@ def save_document_edit(
             paragraphs_json=paragraphs_json,
         ))
     db.commit()
-    return PreviewResponse(paragraphs=data.paragraphs, has_manual_edit=True)
+    return PreviewResponse(paragraphs=clean_paragraphs, has_manual_edit=True)
 
 
 @app.delete("/api/cases/{case_id}/documents/edit")
@@ -1200,9 +1274,17 @@ def download_document(
 @app.get("/api/cases/{case_id}/download-all")
 def download_all_documents(
     case_id: uuid.UUID,
+    format: str = "docx",
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
+    """Пакет всех сгенерированных документов дела архивом .zip.
+    format=docx (по умолчанию, кнопка "Скачать пакет в docx") или
+    format=pdf (кнопка "Скачать пакет в PDF") — документы без готового PDF
+    в этом случае пропускаются."""
+    if format not in ("docx", "pdf"):
+        raise HTTPException(status_code=400, detail="Неподдерживаемый формат — docx или pdf")
+
     case = db.query(models.Case).filter(models.Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Дело не найдено")
@@ -1221,19 +1303,27 @@ def download_all_documents(
     used_names = set()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
         for doc, template_name in rows:
-            if not os.path.exists(doc.docx_file_path):
+            src_path = doc.pdf_file_path if format == "pdf" else doc.docx_file_path
+            if not src_path or not os.path.exists(src_path):
                 continue
-            base_name = _build_document_filename(case.client_name, template_name, "docx")
+            base_name = _build_document_filename(case.client_name, template_name, format)
             final_name = base_name
             i = 2
             while final_name in used_names:
-                final_name = _sanitize_filename(f"{base_name[:-5]} ({i})") + ".docx"
+                final_name = _sanitize_filename(f"{base_name[:-len(format)-1]} ({i})") + "." + format
                 i += 1
             used_names.add(final_name)
-            zf.write(doc.docx_file_path, arcname=final_name)
+            zf.write(src_path, arcname=final_name)
     buffer.seek(0)
 
-    zip_filename = _sanitize_filename(f"{_format_client_short_name(case.client_name)} - документы") + ".zip"
+    if not used_names:
+        raise HTTPException(
+            status_code=404,
+            detail="PDF-версии ещё не готовы ни для одного документа этого дела" if format == "pdf"
+            else "Нет файлов для скачивания",
+        )
+
+    zip_filename = _sanitize_filename(f"{_format_client_short_name(case.client_name)} - документы ({format})") + ".zip"
     from urllib.parse import quote
     return StreamingResponse(
         buffer,

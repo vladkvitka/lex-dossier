@@ -93,6 +93,9 @@ class Case(Base):
     package_id = Column(UUID(as_uuid=True), ForeignKey("template_packages.id"), nullable=True)
     raw_narrative = Column(Text, nullable=True)  # сырой текст фабулы — задел под этап ИИ
     status = Column(String, default="draft")  # draft | in_progress | ready | archived
+    # Момент первого нажатия "Сгенерировать документы". До него статус
+    # всегда draft. От него отсчитываются 4 рабочих дня до авто-архивации.
+    first_generated_at = Column(DateTime(timezone=True), nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

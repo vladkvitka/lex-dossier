@@ -1,7 +1,11 @@
 /*
-  Лекс.Досье — фронтенд этапа 8.
+  Лекс.Досье — фронтенд этапа 11.
   Названия полей запросов сверены с реальными main.py / schemas.py / models.py
   сервера (вход, категории, шаблоны, поля шаблона).
+  В этом этапе: визард "Новое дело" (направление->категория->подкатегория),
+  автосохранение полей вместо кнопки "Сохранить данные", авторазлогин по
+  бездействию, кнопка "Сгенерировать/Обновить документы", скачивание
+  пакета в docx/PDF, типизированные поля ввода (дата/число).
 */
 
 const API = '/api';
@@ -98,6 +102,37 @@ function doLogout(){
   localStorage.removeItem('lex_full_name');
   document.getElementById('appShell').style.display = 'none';
   document.getElementById('loginShell').style.display = 'flex';
+  stopInactivityWatcher();
+}
+
+// ---------- автоматический разлогин после бездействия ----------
+
+const INACTIVITY_LIMIT_MS = 60 * 60 * 1000; // 1 час
+let inactivityTimer = null;
+let inactivityListenersAttached = false;
+
+function resetInactivityTimer(){
+  clearTimeout(inactivityTimer);
+  inactivityTimer = setTimeout(() => {
+    if (!state.token) return;
+    doLogout();
+    toast('Вы вышли из системы из-за часа бездействия');
+  }, INACTIVITY_LIMIT_MS);
+}
+
+function startInactivityWatcher(){
+  if (!inactivityListenersAttached){
+    ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart'].forEach(evt =>
+      window.addEventListener(evt, resetInactivityTimer, { passive: true })
+    );
+    inactivityListenersAttached = true;
+  }
+  resetInactivityTimer();
+}
+
+function stopInactivityWatcher(){
+  clearTimeout(inactivityTimer);
+  inactivityTimer = null;
 }
 
 // ---------- вход в приложение после успешной авторизации ----------
@@ -105,6 +140,7 @@ function doLogout(){
 async function enterApp(){
   document.getElementById('loginShell').style.display = 'none';
   document.getElementById('appShell').style.display = 'flex';
+  startInactivityWatcher();
 
   const role = state.role || 'lawyer';
   const name = state.fullName || '—';
@@ -235,21 +271,10 @@ async function deleteCategoryConfirm(categoryId){
 }
 
 function renderCategorySelects(){
-  // Список категорий для формы «Новое дело» — плоский список всех активных
-  // категорий СВО/гражданские (без подкатегорий отдельно — дело просто
-  // привязывается к конкретной категории/подкатегории напрямую).
-  const opts = state.categories
-    .filter(c => c.branch !== 'service')
-    .slice()
-    .sort(categorySort)
-    .map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`)
-    .join('');
-  const caseCatSelect = document.getElementById('newCaseCategory');
-  if (caseCatSelect){
-    caseCatSelect.innerHTML = '<option value="">— выберите категорию —</option>' + opts;
-  }
-  // Визарды категорий/шаблонов/пакетов сами перестраивают свои селекты по
-  // шагам (см. onCatWizBranchChange / onTmplWizBranchChange / onPkgWizBranchChange).
+  // Визарды категорий/шаблонов/пакетов/нового дела сами перестраивают свои
+  // селекты по шагам (см. onCatWizBranchChange / onTmplWizBranchChange /
+  // onPkgWizBranchChange / onNewCaseBranchChange) — здесь ничего не строим,
+  // функция оставлена как единая точка вызова из loadCategories().
 }
 
 // ---------- визард создания категории ----------
@@ -931,29 +956,88 @@ function renderCasesList(){
       <td>${escapeHtml(c.client_name)}</td>
       <td>${escapeHtml(categoryName(c.category_id))}</td>
       <td>${escapeHtml(c.created_by_email || c.created_by_name || '—')}</td>
-      <td><span class="badge badge-draft">${statusLabel(c.status)}</span></td>
+      <td><span class="badge badge-${c.status}">${statusLabel(c.status)}</span></td>
       <td>${new Date(c.created_at).toLocaleDateString('ru-RU')}</td>
       <td style="text-align:right;"><button class="btn btn-sm" onclick="openCase('${c.id}')">Открыть</button></td>
     </tr>`).join('');
 }
 
+let newCaseTargetCategoryId = null; // выбранная (под)категория дела — итог визарда
+
 async function openNewCaseForm(){
   if (!state.categories.length){
     await loadCategories();
   }
+  // Сброс визарда на первый шаг при каждом открытии формы.
+  newCaseTargetCategoryId = null;
+  document.getElementById('newCaseBranch').value = '';
+  document.getElementById('newCaseCategoryField').style.display = 'none';
+  document.getElementById('newCaseSubcategoryField').style.display = 'none';
+  document.getElementById('newCaseFinalFields').style.display = 'none';
+  document.getElementById('newCaseClient').value = '';
+  document.getElementById('newCaseError').style.display = 'none';
   switchNav('case-new', null);
 }
 
-async function onNewCaseCategoryChange(){
-  const catId = document.getElementById('newCaseCategory').value;
-  const pkgField = document.getElementById('newCasePackageField');
-  const pkgSelect = document.getElementById('newCasePackage');
-  if (!catId){
-    pkgField.style.display = 'none';
+function onNewCaseBranchChange(){
+  const branch = document.getElementById('newCaseBranch').value;
+  const categoryField = document.getElementById('newCaseCategoryField');
+  const subcategoryField = document.getElementById('newCaseSubcategoryField');
+  const finalFields = document.getElementById('newCaseFinalFields');
+  newCaseTargetCategoryId = null;
+  categoryField.style.display = 'none';
+  subcategoryField.style.display = 'none';
+  finalFields.style.display = 'none';
+  if (!branch) return;
+
+  const categorySelect = document.getElementById('newCaseCategory');
+  const tops = topLevelCategoriesOfBranch(branch);
+  categorySelect.innerHTML = '<option value="">— выберите категорию —</option>' +
+    tops.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  categoryField.style.display = 'block';
+}
+
+function onNewCaseCategoryChange(){
+  const categoryId = document.getElementById('newCaseCategory').value;
+  const subcategoryField = document.getElementById('newCaseSubcategoryField');
+  const finalFields = document.getElementById('newCaseFinalFields');
+  newCaseTargetCategoryId = null;
+  finalFields.style.display = 'none';
+  if (!categoryId){
+    subcategoryField.style.display = 'none';
     return;
   }
+  const subSelect = document.getElementById('newCaseSubcategory');
+  const subs = subcategoriesOf(categoryId);
+  if (!subs.length){
+    // В этой категории нет подкатегорий — считаем её саму конечным узлом,
+    // как это уже принято для шаблонов без подкатегорий.
+    subcategoryField.style.display = 'none';
+    selectNewCaseCategoryTarget(categoryId);
+    return;
+  }
+  subSelect.innerHTML = '<option value="">— выберите подкатегорию —</option>' +
+    subs.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
+  subcategoryField.style.display = 'block';
+}
+
+function onNewCaseSubcategoryChange(){
+  const subcategoryId = document.getElementById('newCaseSubcategory').value;
+  if (!subcategoryId){
+    newCaseTargetCategoryId = null;
+    document.getElementById('newCaseFinalFields').style.display = 'none';
+    return;
+  }
+  selectNewCaseCategoryTarget(subcategoryId);
+}
+
+async function selectNewCaseCategoryTarget(categoryId){
+  newCaseTargetCategoryId = categoryId;
+  document.getElementById('newCaseFinalFields').style.display = 'block';
+  const pkgField = document.getElementById('newCasePackageField');
+  const pkgSelect = document.getElementById('newCasePackage');
   try {
-    const packages = await api(`/packages?category_id=${catId}`);
+    const packages = await api(`/packages?category_id=${categoryId}`);
     if (!packages.length){
       pkgField.style.display = 'none';
       pkgSelect.innerHTML = '<option value="">— без пакета, выберу документы вручную —</option>';
@@ -969,13 +1053,13 @@ async function onNewCaseCategoryChange(){
 
 async function createCase(){
   const client = document.getElementById('newCaseClient').value.trim();
-  const categoryId = document.getElementById('newCaseCategory').value;
+  const categoryId = newCaseTargetCategoryId;
   const packageId = document.getElementById('newCasePackage').value || null;
   const errBox = document.getElementById('newCaseError');
   errBox.style.display = 'none';
 
   if (!client || !categoryId){
-    errBox.textContent = 'Укажите клиента и категорию';
+    errBox.textContent = 'Пройдите шаги направления/категории/подкатегории и укажите имя клиента';
     errBox.style.display = 'block';
     return;
   }
@@ -987,9 +1071,6 @@ async function createCase(){
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ category_id: categoryId, client_name: client, package_id: packageId })
     });
-    document.getElementById('newCaseClient').value = '';
-    document.getElementById('newCaseCategory').value = '';
-    document.getElementById('newCasePackageField').style.display = 'none';
     await loadCasesList();
     await openCase(newCase.id);
   } catch (err){
@@ -1032,6 +1113,8 @@ async function openCase(caseId){
     await renderCaseFieldsForm(available);
     renderCaseDocuments();
     renderCaseDocTabs(available);
+    caseHasPendingChanges = false;
+    updateGenerateButtonState();
 
     switchNav('case-detail', null);
   } catch (err){
@@ -1112,6 +1195,7 @@ async function onCaseTemplateToggle(){
   const available = currentAvailableTemplates();
   await renderCaseFieldsForm(available);
   renderCaseDocTabs(available);
+  markCaseHasPendingChanges();
 }
 
 async function renderCaseFieldsForm(available){
@@ -1147,14 +1231,33 @@ async function renderCaseFieldsForm(available){
     ? rows.map(([groupKey, f]) => `
         <div class="field">
           <label>${escapeHtml(f.label)}${f.is_required ? ' *' : ''}${f.is_shared ? ' <span style="color:var(--muted);font-weight:400;">(общее)</span>' : ''}</label>
-          ${f.field_type === 'textarea'
-            ? `<textarea rows="3" data-field-key="${escapeHtml(groupKey)}" oninput="scheduleRefreshPreview()">${escapeHtml(existingValues[groupKey] || '')}</textarea>`
-            : `<input data-field-key="${escapeHtml(groupKey)}" value="${escapeHtml(existingValues[groupKey] || '')}" oninput="scheduleRefreshPreview()">`}
+          ${caseFieldInputHtml(f, groupKey, existingValues[groupKey] || '')}
         </div>`).join('')
     : '<div style="color:var(--muted);">В выбранных документах не найдено полей</div>';
 }
 
-async function saveCaseFields(){
+function caseFieldInputHtml(f, groupKey, value){
+  // Тип поля ограничивает, что можно ввести — например, в "дату" больше
+  // нельзя напечатать буквы: браузер сам не даст ввести некорректный формат.
+  const key = escapeHtml(groupKey);
+  const val = escapeHtml(value);
+  if (f.field_type === 'textarea'){
+    return `<textarea rows="3" data-field-key="${key}" oninput="scheduleRefreshPreview()">${val}</textarea>`;
+  }
+  if (f.field_type === 'date'){
+    // value дела хранится как обычный текст — если это не ISO-дата
+    // (yyyy-mm-dd), нативный date-picker её не примет, оставляем поле
+    // пустым, а не подставляем нечитаемое значение.
+    const isoVal = /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
+    return `<input type="date" data-field-key="${key}" value="${isoVal}" oninput="scheduleRefreshPreview()">`;
+  }
+  if (f.field_type === 'number' || f.field_type === 'money'){
+    return `<input type="number" step="any" inputmode="decimal" data-field-key="${key}" value="${val}" oninput="scheduleRefreshPreview()">`;
+  }
+  return `<input type="text" data-field-key="${key}" value="${val}" oninput="scheduleRefreshPreview()">`;
+}
+
+async function saveCaseFields(opts = {}){
   const inputs = document.querySelectorAll('#caseFieldsBox [data-field-key]');
   const values = {};
   inputs.forEach(el => { values[el.getAttribute('data-field-key')] = el.value; });
@@ -1167,10 +1270,15 @@ async function saveCaseFields(){
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify(values)
     });
-    toast('Данные сохранены');
+    if (!opts.silent) toast('Данные сохранены');
   } catch (err){
-    errBox.textContent = 'Ошибка сохранения: ' + err.message;
-    errBox.style.display = 'block';
+    // Автосохранение молча повторит попытку при следующем вводе — не
+    // показываем тост на каждую неудачу фонового сохранения, только для
+    // явного вызова (например, перед генерацией).
+    if (!opts.silent){
+      errBox.textContent = 'Ошибка сохранения: ' + err.message;
+      errBox.style.display = 'block';
+    }
   }
 }
 
@@ -1250,10 +1358,41 @@ function selectDocTab(templateId){
   refreshPreview();
 }
 
+let fieldsAutoSaveTimer = null;
+
 function scheduleRefreshPreview(){
   if (isEditingDoc) return; // пока правим текст руками — не затираем правки живым рендером по полям
   clearTimeout(previewDebounceTimer);
   previewDebounceTimer = setTimeout(refreshPreview, 500);
+
+  // Данные автоматически сохраняются в базу (без отдельной кнопки), с
+  // небольшой задержкой после последнего нажатия клавиши.
+  clearTimeout(fieldsAutoSaveTimer);
+  fieldsAutoSaveTimer = setTimeout(() => saveCaseFields({ silent: true }), 800);
+
+  markCaseHasPendingChanges();
+}
+
+// ---------- статус кнопки "Сгенерировать/Обновить документы" ----------
+
+let caseHasPendingChanges = false;
+
+function markCaseHasPendingChanges(){
+  caseHasPendingChanges = true;
+  updateGenerateButtonState();
+}
+
+function updateGenerateButtonState(){
+  const btn = document.getElementById('generateDocsBtn');
+  if (!btn) return;
+  const alreadyGenerated = !!(currentCase && currentCase.documents && currentCase.documents.length);
+  if (!alreadyGenerated){
+    btn.textContent = 'Сгенерировать документы';
+    btn.disabled = false;
+    return;
+  }
+  btn.textContent = 'Обновить документы';
+  btn.disabled = !caseHasPendingChanges;
 }
 
 function highlightGaps(text){
@@ -1316,14 +1455,23 @@ function setEditModeUI(editing, hasManualEdit){
   resetBtn.style.display = (!editing && hasManualEdit) ? 'inline-flex' : 'none';
 }
 
+function stripPreviewMarkers(text){
+  // ⟪значение⟫ (подставлено) -> просто значение; ⟦не заполнено: ...⟧ (пропуск)
+  // -> пусто. Иначе служебная разметка предпросмотра попадает в текст
+  // ручной правки буквально и потом утекает в скачанный .docx.
+  return text
+    .replace(/⟪([^⟫]*)⟫/g, '$1')
+    .replace(/⟦[^⟧]*⟧/g, '');
+}
+
 function startEditDoc(){
   if (!currentDocTabId) return;
   isEditingDoc = true;
   const docBody = document.getElementById('docBody');
   const textarea = document.createElement('textarea');
   textarea.id = 'docEditTextarea';
-  textarea.style.cssText = 'width:100%;min-height:360px;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-display);font-size:14.5px;line-height:1.7;resize:vertical;';
-  textarea.value = lastPreviewParagraphs.join('\n');
+  textarea.style.cssText = 'width:100%;min-height:360px;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-doc);font-size:14.5px;line-height:1.7;resize:vertical;';
+  textarea.value = lastPreviewParagraphs.map(stripPreviewMarkers).join('\n');
   docBody.innerHTML = '';
   docBody.appendChild(textarea);
   setEditModeUI(true);
@@ -1351,6 +1499,7 @@ async function saveEditDoc(){
     isEditingDoc = false;
     renderDocBodyReadOnly(lastPreviewParagraphs);
     setEditModeUI(false, true);
+    markCaseHasPendingChanges();
     toast('Правки сохранены — учтутся при генерации документа');
   } catch (err){
     toast('Ошибка сохранения правок: ' + err.message);
@@ -1365,6 +1514,7 @@ async function resetEditDoc(){
     await api(`/cases/${currentCase.id}/documents/edit?template_id=${currentDocTabId}`, { method: 'DELETE' });
     toast('Ручные правки отменены');
     await refreshPreview();
+    markCaseHasPendingChanges();
   } catch (err){
     toast('Ошибка: ' + err.message);
   }
@@ -1375,11 +1525,12 @@ async function generateDocuments(){
     toast('Сначала выберите хотя бы один документ');
     return;
   }
+  const wasAlreadyGenerated = !!(currentCase.documents && currentCase.documents.length);
   const errBox = document.getElementById('caseFormError');
   errBox.style.display = 'none';
   try {
     // Сначала сохраняем текущие значения формы, чтобы генерация шла по свежим данным
-    await saveCaseFields();
+    await saveCaseFields({ silent: true });
     await api(`/cases/${currentCase.id}/generate`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
@@ -1387,7 +1538,12 @@ async function generateDocuments(){
     });
     currentCase = await api(`/cases/${currentCase.id}`);
     renderCaseDocuments();
-    toast('Документы сгенерированы');
+    document.getElementById('caseSub').textContent =
+      categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status) +
+      (currentCase.created_by_email ? ' · автор: ' + currentCase.created_by_email : '');
+    caseHasPendingChanges = false;
+    updateGenerateButtonState();
+    toast(wasAlreadyGenerated ? 'Документы обновлены' : 'Документы сгенерированы');
   } catch (err){
     errBox.textContent = 'Ошибка генерации: ' + err.message;
     errBox.style.display = 'block';
@@ -1429,24 +1585,10 @@ async function downloadCaseDocument(documentId, format){
   }
 }
 
-function downloadActiveTabDoc(format){
-  if (!currentDocTabId || !currentCase) return;
-  const doc = (currentCase.documents || []).find(d => d.template_id === currentDocTabId);
-  if (!doc){
-    toast('Сначала сгенерируйте документы для этого дела');
-    return;
-  }
-  if (format === 'pdf' && !doc.has_pdf){
-    toast('PDF-версия для этого документа недоступна');
-    return;
-  }
-  downloadCaseDocument(doc.id, format);
-}
-
-async function downloadAllCaseDocuments(){
+async function downloadAllCaseDocuments(format){
   if (!currentCase) return;
   try {
-    const res = await fetch(`${API}/cases/${currentCase.id}/download-all`, {
+    const res = await fetch(`${API}/cases/${currentCase.id}/download-all?format=${format}`, {
       headers: { 'Authorization': 'Bearer ' + state.token }
     });
     if (res.status === 401){ doLogout(); throw new Error('Сессия истекла'); }

@@ -103,6 +103,7 @@ function doLogout(){
   document.getElementById('appShell').style.display = 'none';
   document.getElementById('loginShell').style.display = 'flex';
   stopInactivityWatcher();
+  stopCasesListPolling();
 }
 
 // ---------- автоматический разлогин после бездействия ----------
@@ -162,6 +163,7 @@ async function enterApp(){
     await loadTemplates();
     await loadCasesList();
     switchNav('cases-list', document.querySelector('#nav-lawyer [data-nav=cases-list]'));
+    startCasesListPolling();
   }
 }
 
@@ -173,6 +175,38 @@ function switchNav(screenId, btn){
     parent.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
     if (btn) btn.classList.add('active');
   }
+}
+
+// Статус дела на сервере может смениться сам по себе (генерация другим
+// сотрудником, авто-архивация по истечении 4 рабочих дней) — простой
+// switchNav показывал бы старые данные, загруженные при входе в систему,
+// пока не нажмёшь F5. Клик по "Дела" в меню теперь всегда сначала
+// перезапрашивает список, а пока экран открыт — обновляет его сам по себе.
+async function openCasesListNav(btn){
+  switchNav('cases-list', btn);
+  try { await loadCasesList(); } catch (err){ toast('Не удалось обновить список дел: ' + err.message); }
+  startCasesListPolling();
+}
+
+let casesListPollTimer = null;
+const CASES_LIST_POLL_MS = 60 * 1000;
+
+function startCasesListPolling(){
+  stopCasesListPolling();
+  casesListPollTimer = setInterval(() => {
+    const screen = document.getElementById('screen-cases-list');
+    if (!screen || !screen.classList.contains('active')){
+      stopCasesListPolling();
+      return;
+    }
+    loadCasesList().catch(() => {}); // тихий фоновый рефреш, без тостов об ошибках
+  }, CASES_LIST_POLL_MS);
+}
+
+function stopCasesListPolling(){
+  clearTimeout(casesListPollTimer);
+  clearInterval(casesListPollTimer);
+  casesListPollTimer = null;
 }
 
 // ---------- категории ----------
@@ -1173,6 +1207,7 @@ async function deleteCurrentCase(){
     currentCase = null;
     await loadCasesList();
     switchNav('cases-list', document.querySelector(state.role === 'admin' ? '#nav-admin [data-nav=cases-list]' : '#nav-lawyer [data-nav=cases-list]'));
+    startCasesListPolling();
   } catch (err){
     toast('Ошибка: ' + err.message);
   }
@@ -1477,26 +1512,48 @@ function setEditModeUI(editing, hasManualEdit){
 }
 
 function stripPreviewMarkers(text){
-  // ⟪значение⟫ (подставлено) -> просто значение; ⟦не заполнено: ...⟧ (пропуск)
-  // -> пусто. Иначе служебная разметка предпросмотра попадает в текст
-  // ручной правки буквально и потом утекает в скачанный .docx.
+  // ⟪значение⟫ (подставлено) -> просто значение.
+  // ⟦не заполнено: label⟧ (пропуск) -> [не заполнено: label] — обычными
+  // квадратными скобками, чтобы поле не пропадало молча в тексте правки,
+  // если его так и не заполнили (тот же формат, что и на сервере — см.
+  // _strip_preview_markers в main.py).
   return text
     .replace(/⟪([^⟫]*)⟫/g, '$1')
-    .replace(/⟦[^⟧]*⟧/g, '');
+    .replace(/⟦не заполнено: ([^⟧]*)⟧/g, '[не заполнено: $1]')
+    .replace(/⟦([^⟧]*)⟧/g, '[$1]');
+}
+
+function autoGrowTextarea(ta){
+  ta.style.height = 'auto';
+  ta.style.height = (ta.scrollHeight + 2) + 'px';
 }
 
 function startEditDoc(){
   if (!currentDocTabId) return;
   isEditingDoc = true;
   const docBody = document.getElementById('docBody');
-  const textarea = document.createElement('textarea');
-  textarea.id = 'docEditTextarea';
-  textarea.style.cssText = 'width:100%;min-height:360px;border:1px solid var(--border);border-radius:8px;padding:16px;font-family:var(--font-doc);font-size:14.5px;line-height:1.7;resize:vertical;';
-  textarea.value = lastPreviewParagraphs.map(stripPreviewMarkers).join('\n');
   docBody.innerHTML = '';
-  docBody.appendChild(textarea);
+  // Один textarea НА КАЖДЫЙ абзац (а не одно большое поле на весь текст) —
+  // это принципиально: так число абзацев физически не может разъехаться
+  // при сохранении (раньше лишняя/недостающая пустая строка в общем поле
+  // сдвигала все абзацы после неё, и на сервере им доставалось чужое
+  // форматирование — см. _apply_paragraph_texts в main.py).
+  const wrap = document.createElement('div');
+  wrap.id = 'docEditParagraphs';
+  wrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
+  lastPreviewParagraphs.forEach(p => {
+    const ta = document.createElement('textarea');
+    ta.className = 'doc-edit-paragraph';
+    ta.style.cssText = 'width:100%;min-height:40px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-family:var(--font-doc);font-size:14.5px;line-height:1.7;resize:none;overflow:hidden;';
+    ta.value = stripPreviewMarkers(p);
+    ta.addEventListener('input', () => autoGrowTextarea(ta));
+    wrap.appendChild(ta);
+  });
+  docBody.appendChild(wrap);
+  wrap.querySelectorAll('textarea').forEach(autoGrowTextarea);
   setEditModeUI(true);
-  textarea.focus();
+  const first = wrap.querySelector('textarea');
+  if (first) first.focus();
 }
 
 function cancelEditDoc(){
@@ -1506,9 +1563,12 @@ function cancelEditDoc(){
 }
 
 async function saveEditDoc(){
-  const textarea = document.getElementById('docEditTextarea');
-  if (!textarea) return;
-  const paragraphs = textarea.value.split('\n');
+  const wrap = document.getElementById('docEditParagraphs');
+  if (!wrap) return;
+  // Порядок textarea в DOM == порядок абзацев — берём значения как есть,
+  // без split по строкам, поэтому число абзацев остаётся ровно таким же,
+  // каким было при открытии редактирования.
+  const paragraphs = Array.from(wrap.querySelectorAll('textarea')).map(ta => ta.value);
   try {
     const result = await api(`/cases/${currentCase.id}/documents/edit`, {
       method: 'PUT',

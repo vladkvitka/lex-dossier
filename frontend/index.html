@@ -49,7 +49,7 @@
     <div class="sidenav" id="nav-lawyer" style="display:none;">
       <div class="sidenav-section">
         <div class="sidenav-label">Рабочее пространство</div>
-        <button class="nav-item active" data-nav="cases-list" onclick="switchNav('cases-list', this)">Дела</button>
+        <button class="nav-item active" data-nav="cases-list" onclick="openCasesListNav(this)">Дела</button>
       </div>
     </div>
 
@@ -57,7 +57,7 @@
     <div class="sidenav" id="nav-admin" style="display:none;">
       <div class="sidenav-section">
         <div class="sidenav-label">Рабочее пространство</div>
-        <button class="nav-item" data-nav="cases-list" onclick="switchNav('cases-list', this)">Дела</button>
+        <button class="nav-item" data-nav="cases-list" onclick="openCasesListNav(this)">Дела</button>
       </div>
       <div class="sidenav-section">
         <div class="sidenav-label">Управление</div>
@@ -86,7 +86,7 @@
       <div class="screen" id="screen-case-new">
         <h1 class="page-title">Новое дело</h1>
         <p class="page-sub">Направление → категория → подкатегория — дальше клиент, пакет документов и создание дела</p>
-        <button class="btn" style="margin-bottom:16px;" onclick="switchNav('cases-list', null)">← К списку дел</button>
+        <button class="btn" style="margin-bottom:16px;" onclick="openCasesListNav(null)">← К списку дел</button>
         <div class="upload-zone">
           <div class="field">
             <label>1. Направление</label>
@@ -142,7 +142,7 @@
         <h1 class="page-title" id="caseTitle">Дело</h1>
         <p class="page-sub" id="caseSub"></p>
         <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-          <button class="btn" onclick="switchNav('cases-list', null)">← К списку дел</button>
+          <button class="btn" onclick="openCasesListNav(null)">← К списку дел</button>
           <button class="btn" onclick="renameCurrentCase()">Переименовать</button>
           <button class="btn" style="color:var(--wine);" onclick="deleteCurrentCase()">Удалить дело</button>
         </div>
@@ -370,6 +370,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=10"></script>
+<script src="app.js?v=11"></script>
 </body>
 </html>

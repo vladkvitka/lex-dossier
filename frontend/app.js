@@ -963,6 +963,7 @@ function renderCasesList(){
 }
 
 let newCaseTargetCategoryId = null; // выбранная (под)категория дела — итог визарда
+let newCaseSelectedBranch = null;   // направление — определяет, показывать ли "Кто заявитель"
 
 async function openNewCaseForm(){
   if (!state.categories.length){
@@ -970,10 +971,13 @@ async function openNewCaseForm(){
   }
   // Сброс визарда на первый шаг при каждом открытии формы.
   newCaseTargetCategoryId = null;
+  newCaseSelectedBranch = null;
   document.getElementById('newCaseBranch').value = '';
   document.getElementById('newCaseCategoryField').style.display = 'none';
   document.getElementById('newCaseSubcategoryField').style.display = 'none';
   document.getElementById('newCaseFinalFields').style.display = 'none';
+  document.getElementById('newCaseApplicantField').style.display = 'none';
+  document.getElementById('newCaseApplicant').value = '';
   document.getElementById('newCaseClient').value = '';
   document.getElementById('newCaseError').style.display = 'none';
   switchNav('case-new', null);
@@ -981,6 +985,7 @@ async function openNewCaseForm(){
 
 function onNewCaseBranchChange(){
   const branch = document.getElementById('newCaseBranch').value;
+  newCaseSelectedBranch = branch || null;
   const categoryField = document.getElementById('newCaseCategoryField');
   const subcategoryField = document.getElementById('newCaseSubcategoryField');
   const finalFields = document.getElementById('newCaseFinalFields');
@@ -1034,6 +1039,15 @@ function onNewCaseSubcategoryChange(){
 async function selectNewCaseCategoryTarget(categoryId){
   newCaseTargetCategoryId = categoryId;
   document.getElementById('newCaseFinalFields').style.display = 'block';
+  // "Кто заявитель" — только для направления СВО; для гражданских/административных
+  // дел это поле не показываем и не отправляем (см. _svo_applicant_context на бэке).
+  const applicantField = document.getElementById('newCaseApplicantField');
+  if (newCaseSelectedBranch === 'svo'){
+    applicantField.style.display = 'block';
+  } else {
+    applicantField.style.display = 'none';
+    document.getElementById('newCaseApplicant').value = '';
+  }
   const pkgField = document.getElementById('newCasePackageField');
   const pkgSelect = document.getElementById('newCasePackage');
   try {
@@ -1055,11 +1069,18 @@ async function createCase(){
   const client = document.getElementById('newCaseClient').value.trim();
   const categoryId = newCaseTargetCategoryId;
   const packageId = document.getElementById('newCasePackage').value || null;
+  const isSvo = newCaseSelectedBranch === 'svo';
+  const applicantType = isSvo ? document.getElementById('newCaseApplicant').value : null;
   const errBox = document.getElementById('newCaseError');
   errBox.style.display = 'none';
 
   if (!client || !categoryId){
     errBox.textContent = 'Пройдите шаги направления/категории/подкатегории и укажите имя клиента';
+    errBox.style.display = 'block';
+    return;
+  }
+  if (isSvo && !applicantType){
+    errBox.textContent = 'Для направления СВО укажите, кто заявитель';
     errBox.style.display = 'block';
     return;
   }
@@ -1069,7 +1090,7 @@ async function createCase(){
     const newCase = await api('/cases', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ category_id: categoryId, client_name: client, package_id: packageId })
+      body: JSON.stringify({ category_id: categoryId, client_name: client, package_id: packageId, applicant_type: applicantType })
     });
     await loadCasesList();
     await openCase(newCase.id);

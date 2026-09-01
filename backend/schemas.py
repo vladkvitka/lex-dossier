@@ -132,6 +132,11 @@ class CaseCreate(BaseModel):
     category_id: UUID
     client_name: str
     package_id: Optional[UUID] = None
+    # Кто заявитель — актуально только для направления "СВО" (branch='svo').
+    # Один и тот же набор шаблонов СВО пишется один раз с условной логикой
+    # ({% if %} по этому полю внутри .docx), а не дублируется на 6 шаблонов
+    # под каждого родственника. Для гражданских дел не используется.
+    applicant_type: Optional[str] = None
 
 
 class CaseOut(BaseModel):

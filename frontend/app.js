@@ -1564,11 +1564,23 @@ async function saveEditDoc(){
   // без split по строкам, поэтому число абзацев остаётся ровно таким же,
   // каким было при открытии редактирования.
   const paragraphs = Array.from(wrap.querySelectorAll('textarea')).map(ta => ta.value);
+
+  // Те же значения полей, что видел юрист в момент правки — сервер
+  // рендерит по ним ТОТ ЖЕ документ и применяет правки прямо к нему.
+  const inputs = document.querySelectorAll('#caseFieldsBox [data-field-key]');
+  const values = {};
+  inputs.forEach(el => { values[el.getAttribute('data-field-key')] = el.value; });
+
   try {
     const result = await api(`/cases/${currentCase.id}/documents/edit`, {
       method: 'PUT',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ template_id: currentDocTabId, paragraphs })
+      body: JSON.stringify({
+        template_id: currentDocTabId,
+        paragraphs,
+        values,
+        selected_template_ids: Array.from(currentCaseSelectedTemplates)
+      })
     });
     lastPreviewParagraphs = result.paragraphs;
     lastPreviewHasManualEdit = result.has_manual_edit;
@@ -1578,7 +1590,14 @@ async function saveEditDoc(){
     markCaseHasPendingChanges();
     toast('Правки сохранены — учтутся при генерации документа');
   } catch (err){
-    toast('Ошибка сохранения правок: ' + err.message);
+    // 409 — данные дела успели измениться, пока шло редактирование
+    // (см. save_document_edit на сервере); предлагаем переоткрыть документ,
+    // а не тихо считать, что правки сохранились.
+    if (String(err.message).includes('изменились, пока вы редактировали')){
+      toast('Данные дела изменились, пока вы редактировали документ — переоткройте его и повторите правки');
+    } else {
+      toast('Ошибка сохранения правок: ' + err.message);
+    }
   }
 }
 

@@ -3,6 +3,7 @@ import re
 import json
 import shutil
 import subprocess
+import sys
 import tempfile
 import uuid
 import zipfile
@@ -875,19 +876,34 @@ def update_case_fields(
 
 def _convert_to_pdf(docx_path: str, out_dir: str) -> Optional[str]:
     """Конвертирует docx в pdf через LibreOffice headless. При любой ошибке
-    возвращает None — генерация docx при этом всё равно считается успешной."""
+    возвращает None — генерация docx при этом всё равно считается успешной.
+
+    Каждому вызову даётся СВОЙ временный профиль LibreOffice
+    (-env:UserInstallation). Без этого повторные вызовы soffice в рамках
+    одной генерации пакета (несколько документов подряд) конкурируют за
+    один и тот же профиль пользователя, конвертация тихо падает по
+    таймауту/блокировке — и PDF не появляется вообще ни у одного документа."""
+    profile_dir = tempfile.mkdtemp(prefix="lo_profile_")
     try:
         subprocess.run(
-            ["soffice", "--headless", "--convert-to", "pdf", "--outdir", out_dir, docx_path],
+            [
+                "soffice", "--headless", "--norestore",
+                f"-env:UserInstallation=file://{profile_dir}",
+                "--convert-to", "pdf", "--outdir", out_dir, docx_path,
+            ],
             check=True,
-            timeout=60,
+            timeout=90,
             capture_output=True,
         )
         base_name = os.path.splitext(os.path.basename(docx_path))[0]
         pdf_path = os.path.join(out_dir, base_name + ".pdf")
         return pdf_path if os.path.exists(pdf_path) else None
-    except Exception:
+    except Exception as e:
+        detail = e.stderr.decode("utf-8", "ignore") if isinstance(e, subprocess.CalledProcessError) and e.stderr else str(e)
+        print(f"[pdf-convert] Не удалось сконвертировать {docx_path} в PDF: {detail}", file=sys.stderr)
         return None
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
 
 
 def _set_run_font(run, font_name: str = "Times New Roman"):
@@ -932,6 +948,17 @@ def _normalize_font(docx_path: str, font_name: str = "Times New Roman"):
         pass
 
 
+def _display_value_for_field(field_type: str, value: str) -> str:
+    """Значение поля так, как оно должно попасть в текст документа.
+    Поле хранится в базе как есть (для дат — ISO yyyy-mm-dd, это формат
+    нативного <input type="date">), но в самом документе дата должна быть
+    в привычном для юридических текстов виде дд.мм.гггг."""
+    if field_type == "date" and value and re.match(r"^\d{4}-\d{2}-\d{2}$", value):
+        y, m, d = value.split("-")
+        return f"{d}.{m}.{y}"
+    return value
+
+
 def _format_client_short_name(full_name: str) -> str:
     """«Иванов Иван Иванович» -> «Иванов И.И.»"""
     parts = [p for p in (full_name or "").strip().split() if p]
@@ -960,20 +987,39 @@ def _extract_paragraph_texts(docx_path: str) -> List[str]:
 
 def _apply_paragraph_texts(docx_path: str, texts: List[str]):
     """Записывает текст абзацев обратно в реальный .docx, стараясь сохранить
-    форматирование (шрифт нормализуется отдельным шагом после). Если абзацев
-    в правках больше, чем было в документе — лишние добавляются в конец по
-    образцу последнего абзаца. Если меньше — оставшиеся исходные очищаются."""
+    форматирование каждого абзаца.
+
+    Важно: форматирование берём не из runs[0], а из САМОГО ДЛИННОГО run
+    исходного абзаца. Причина бага, из-за которого при ручной правке
+    "ломался" шрифт/выравнивание: в реальных .docx-шаблонах первый run
+    абзаца нередко служебный — пустой или содержит устаревшее форматирование
+    (например, остаток от закладки/якоря Word) и отличается от run'а с
+    видимым текстом. Слепое копирование формата runs[0] переносило именно
+    это "чужое" форматирование на весь новый текст абзаца.
+
+    Абзацы предполагаются в строгом соответствии 1:1 с тем, что показывалось
+    в редакторе на фронте (см. startEditDoc — редактирование теперь идёт
+    по одному textarea на абзац, а не одним большим полем, поэтому число
+    абзацев в texts гарантированно совпадает с числом абзацев в документе).
+    Ветки на случай рассинхронизации всё равно оставлены как страховка."""
     doc = DocxDocument(docx_path)
     paragraphs = doc.paragraphs
     n_original = len(paragraphs)
     n_new = len(texts)
 
+    def primary_run(p):
+        if not p.runs:
+            return None
+        return max(p.runs, key=lambda r: len(r.text or ""))
+
     for i in range(min(n_original, n_new)):
         p = paragraphs[i]
-        if p.runs:
-            p.runs[0].text = texts[i]
-            for extra in p.runs[1:]:
-                extra.text = ""
+        style_run = primary_run(p)
+        if style_run is not None:
+            style_run.text = texts[i]
+            for extra in p.runs:
+                if extra is not style_run:
+                    extra.text = ""
         else:
             p.add_run(texts[i])
 
@@ -983,24 +1029,33 @@ def _apply_paragraph_texts(docx_path: str, texts: List[str]):
 
     if n_new > n_original and n_original > 0:
         last_p = paragraphs[-1]
+        style_run = primary_run(last_p)
         for i in range(n_original, n_new):
             new_p = doc.add_paragraph()
             new_p.paragraph_format.alignment = last_p.paragraph_format.alignment
+            new_p.paragraph_format.left_indent = last_p.paragraph_format.left_indent
+            new_p.paragraph_format.first_line_indent = last_p.paragraph_format.first_line_indent
             run = new_p.add_run(texts[i])
-            if last_p.runs:
-                run.bold = last_p.runs[0].bold
-                run.italic = last_p.runs[0].italic
+            if style_run is not None:
+                run.bold = style_run.bold
+                run.italic = style_run.italic
+                run.font.size = style_run.font.size
+                run.font.name = style_run.font.name
 
     doc.save(docx_path)
 
 
 def _strip_preview_markers(text: str) -> str:
-    """Убирает служебную разметку предпросмотра (⟪заполнено⟫ / ⟦не заполнено⟧),
-    если она случайно попала в текст ручной правки — иначе эти символы
-    утекают буквально в скачанный .docx. Фронтенд уже не должен их
-    показывать при редактировании, но это подстраховка на сервере."""
+    """Убирает служебную unicode-разметку предпросмотра, если она случайно
+    попала в текст ручной правки:
+      ⟪значение⟫ (подставлено)     -> просто значение
+      ⟦не заполнено: label⟧ (пропуск) -> [не заполнено: label] (обычными
+        квадратными скобками — заметно и при беглом просмотре редактируемого
+        текста, и в самом скачанном документе, если поле так и оставили
+        пустым; но никогда не пропадает молча, как было раньше)."""
     text = re.sub(r"⟪([^⟫]*)⟫", r"\1", text)
-    text = re.sub(r"⟦[^⟧]*⟧", "", text)
+    text = re.sub(r"⟦не заполнено: ([^⟧]*)⟧", r"[не заполнено: \1]", text)
+    text = re.sub(r"⟦([^⟧]*)⟧", r"[\1]", text)
     return text
 
 
@@ -1087,7 +1142,7 @@ def generate_documents(
                 context[f.field_key] = documents_list_text
                 continue
             lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
-            context[f.field_key] = case_field_values.get(lookup_key, "")
+            context[f.field_key] = _display_value_for_field(f.field_type, case_field_values.get(lookup_key, ""))
 
         # Если по этому шаблону в деле уже есть сгенерированный документ —
         # это повторная генерация ("Обновить документы"): перезаписываем его
@@ -1209,13 +1264,14 @@ def preview_document(
             continue
         lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
         value = data.values.get(lookup_key)
+        display_value = _display_value_for_field(f.field_type, value) if value else None
         # Пустое поле — служебная метка ⟦...⟧ (подсветится красным на фронте).
         # Заполненное — метка ⟪...⟫ (подсветится синим): так лавочник видит,
         # что этот текст — результат подстановки (включая склонение через
         # фильтры |dative и т.п.), а не исходный текст шаблона, и может
         # проверить его перед генерацией. В реальный .docx эти метки не
         # попадают — там значения подставляются без обёртки (см. generate).
-        context[f.field_key] = f"⟪{value}⟫" if value else f"⟦не заполнено: {f.label}⟧"
+        context[f.field_key] = f"⟪{display_value}⟫" if display_value else f"⟦не заполнено: {f.label}⟧"
 
     tmp_path = None
     try:

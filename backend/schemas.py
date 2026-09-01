@@ -203,3 +203,10 @@ class PreviewResponse(BaseModel):
 class CaseDocumentEditRequest(BaseModel):
     template_id: UUID
     paragraphs: List[str]
+    # Текущие значения полей формы (как в PreviewRequest) — нужны, чтобы на
+    # сервере отрендерить ТОТ ЖЕ САМЫЙ документ, что сейчас видит юрист в
+    # редакторе, и применить правки прямо к нему (а не к какому-то другому
+    # рендеру, полученному позже — из-за этого раньше расходилось число
+    # абзацев и документ портился).
+    values: Dict[str, str] = {}
+    selected_template_ids: List[UUID] = []

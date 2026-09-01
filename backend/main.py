@@ -883,6 +883,14 @@ def _convert_to_pdf(docx_path: str, out_dir: str) -> Optional[str]:
     одной генерации пакета (несколько документов подряд) конкурируют за
     один и тот же профиль пользователя, конвертация тихо падает по
     таймауту/блокировке — и PDF не появляется вообще ни у одного документа."""
+    if shutil.which("soffice") is None:
+        print(
+            "[pdf-convert] Бинарник soffice не найден в PATH — LibreOffice, похоже, "
+            "не установлен на сервере. Установить: sudo apt install libreoffice --no-install-recommends",
+            file=sys.stderr,
+        )
+        return None
+
     profile_dir = tempfile.mkdtemp(prefix="lo_profile_")
     try:
         subprocess.run(
@@ -1172,10 +1180,27 @@ def generate_documents(
         manual_edit = _get_manual_edit(db, case_id, template_id)
         if manual_edit:
             try:
-                texts = json.loads(manual_edit.paragraphs_json)
-                _apply_paragraph_texts(docx_path, texts)
-            except Exception:
-                pass  # если что-то пошло не так — остаётся вариант с подставленными полями
+                texts = [_strip_preview_markers(t) for t in json.loads(manual_edit.paragraphs_json)]
+                current_count = len(_extract_paragraph_texts(docx_path))
+                if len(texts) == current_count:
+                    _apply_paragraph_texts(docx_path, texts)
+                else:
+                    # Число абзацев правки не совпадает с тем, что реально
+                    # отрендерилось сейчас (шаблон с {% if %} мог дать другое
+                    # число абзацев при других значениях полей на момент
+                    # правки vs сейчас). Попытка применить правки по индексу
+                    # при таком расхождении корёжит документ — часть абзацев
+                    # затирается пустым текстом. Безопаснее пропустить
+                    # применение и оставить обычную подстановку полей, чем
+                    # отдать юристу документ с пустыми страницами.
+                    print(
+                        f"[manual-edit] Пропущено: {current_count} абзацев в документе, "
+                        f"{len(texts)} в сохранённой правке (template_id={template_id})",
+                        file=sys.stderr,
+                    )
+            except Exception as e:
+                print(f"[manual-edit] Ошибка применения правок: {e}", file=sys.stderr)
+                # если что-то пошло не так — остаётся вариант с подставленными полями
 
         _normalize_font(docx_path)
 
@@ -1215,6 +1240,29 @@ def generate_documents(
         )
         for doc, name in created_docs
     ]
+
+
+class _PreviewFieldValue(str):
+    """Строка для контекста ПРЕДПРОСМОТРА документа: выглядит как обычный
+    текст с меткой (⟪значение⟫ или ⟦не заполнено: ...⟧) для {{ поле }},
+    но в булевом контексте ({% if поле %}) ведёт себя так же, как вело бы
+    себя РЕАЛЬНОЕ значение на генерации — то есть True только если поле
+    реально заполнено.
+
+    Без этого шаблоны с условными абзацами (например,
+    "{% if телефон %}доп. блок про телефон{% endif %}") в превью считали
+    бы поле заполненным всегда, ведь строка-обёртка ⟦не заполнено⟧ сама по
+    себе непустая. Из-за этого число абзацев, захваченное при открытии
+    ручного редактирования, расходилось с реальным числом абзацев на
+    генерации (где то же поле оказывалось пустым и абзац пропадал) — и
+    именно это ломало скачанный документ при применении ручных правок."""
+    def __new__(cls, display_text: str, is_filled: bool):
+        obj = str.__new__(cls, display_text)
+        obj._is_filled = is_filled
+        return obj
+
+    def __bool__(self):
+        return self._is_filled
 
 
 @app.post("/api/cases/{case_id}/preview", response_model=PreviewResponse)
@@ -1260,7 +1308,7 @@ def preview_document(
     context.update(_svo_applicant_context(db, case))
     for f in template_fields:
         if f.field_type == "documents_list":
-            context[f.field_key] = f"⟪{documents_list_text}⟫"
+            context[f.field_key] = _PreviewFieldValue(f"⟪{documents_list_text}⟫", bool(documents_list_text))
             continue
         lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
         value = data.values.get(lookup_key)
@@ -1271,7 +1319,8 @@ def preview_document(
         # фильтры |dative и т.п.), а не исходный текст шаблона, и может
         # проверить его перед генерацией. В реальный .docx эти метки не
         # попадают — там значения подставляются без обёртки (см. generate).
-        context[f.field_key] = f"⟪{display_value}⟫" if display_value else f"⟦не заполнено: {f.label}⟧"
+        display_text = f"⟪{display_value}⟫" if display_value else f"⟦не заполнено: {f.label}⟧"
+        context[f.field_key] = _PreviewFieldValue(display_text, bool(display_value))
 
     tmp_path = None
     try:
@@ -1306,8 +1355,7 @@ def save_document_edit(
         raise HTTPException(status_code=404, detail="Дело не найдено")
 
     existing = _get_manual_edit(db, case_id, data.template_id)
-    clean_paragraphs = [_strip_preview_markers(p) for p in data.paragraphs]
-    paragraphs_json = json.dumps(clean_paragraphs, ensure_ascii=False)
+    paragraphs_json = json.dumps(data.paragraphs, ensure_ascii=False)
     if existing:
         existing.paragraphs_json = paragraphs_json
     else:
@@ -1318,7 +1366,7 @@ def save_document_edit(
             paragraphs_json=paragraphs_json,
         ))
     db.commit()
-    return PreviewResponse(paragraphs=clean_paragraphs, has_manual_edit=True)
+    return PreviewResponse(paragraphs=data.paragraphs, has_manual_edit=True)
 
 
 @app.delete("/api/cases/{case_id}/documents/edit")

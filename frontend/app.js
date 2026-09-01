@@ -1511,18 +1511,6 @@ function setEditModeUI(editing, hasManualEdit){
   resetBtn.style.display = (!editing && hasManualEdit) ? 'inline-flex' : 'none';
 }
 
-function stripPreviewMarkers(text){
-  // ⟪значение⟫ (подставлено) -> просто значение.
-  // ⟦не заполнено: label⟧ (пропуск) -> [не заполнено: label] — обычными
-  // квадратными скобками, чтобы поле не пропадало молча в тексте правки,
-  // если его так и не заполнили (тот же формат, что и на сервере — см.
-  // _strip_preview_markers в main.py).
-  return text
-    .replace(/⟪([^⟫]*)⟫/g, '$1')
-    .replace(/⟦не заполнено: ([^⟧]*)⟧/g, '[не заполнено: $1]')
-    .replace(/⟦([^⟧]*)⟧/g, '[$1]');
-}
-
 function autoGrowTextarea(ta){
   ta.style.height = 'auto';
   ta.style.height = (ta.scrollHeight + 2) + 'px';
@@ -1538,6 +1526,13 @@ function startEditDoc(){
   // при сохранении (раньше лишняя/недостающая пустая строка в общем поле
   // сдвигала все абзацы после неё, и на сервере им доставалось чужое
   // форматирование — см. _apply_paragraph_texts в main.py).
+  //
+  // Текст абзацев показываем КАК ЕСТЬ, включая служебные метки ⟪⟫/⟦⟧ —
+  // это осознанно: метки нужны, чтобы после сохранения правки нетронутые
+  // абзацы по-прежнему подсвечивались (синим/красным) при повторном
+  // открытии документа. От утечки этих меток в скачанный .docx это не
+  // страдает — они вычищаются один раз, прямо перед вставкой текста в
+  // итоговый файл на генерации (см. _strip_preview_markers в main.py).
   const wrap = document.createElement('div');
   wrap.id = 'docEditParagraphs';
   wrap.style.cssText = 'display:flex;flex-direction:column;gap:10px;';
@@ -1545,7 +1540,7 @@ function startEditDoc(){
     const ta = document.createElement('textarea');
     ta.className = 'doc-edit-paragraph';
     ta.style.cssText = 'width:100%;min-height:40px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-family:var(--font-doc);font-size:14.5px;line-height:1.7;resize:none;overflow:hidden;';
-    ta.value = stripPreviewMarkers(p);
+    ta.value = p;
     ta.addEventListener('input', () => autoGrowTextarea(ta));
     wrap.appendChild(ta);
   });

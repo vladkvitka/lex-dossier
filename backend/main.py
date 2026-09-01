@@ -611,6 +611,32 @@ def delete_package(
 
 # ---------- Дела ----------
 
+# Ключ спец-поля "кто заявитель" для направления СВО. Не привязан ни к
+# одному конкретному TemplateField — подставляется в контекст рендера
+# каждого документа СВО-дела напрямую (см. _svo_applicant_context), а
+# внутри .docx-шаблонов используется через {% if %}/{% elif %}, например:
+#   {% if тип_заявителя == "жена" %}являюсь супругой{% elif ... %}
+APPLICANT_TYPE_FIELD_KEY = "тип_заявителя"
+APPLICANT_TYPE_OPTIONS = ["военнослужащий", "жена", "мать", "отец", "брат", "сестра"]
+
+
+def _svo_applicant_context(db: Session, case: models.Case) -> dict:
+    """Если дело относится к направлению СВО — возвращает {тип_заявителя: значение}
+    для подмешивания в контекст рендера КАЖДОГО документа этого дела, независимо
+    от того, объявлено ли это поле как TemplateField у конкретного шаблона.
+    Для гражданских/административных дел возвращает пустой словарь — поведение
+    для этого направления не меняется."""
+    category = db.query(models.Category).filter(models.Category.id == case.category_id).first()
+    if not category or category.branch != "svo":
+        return {}
+    value = (
+        db.query(models.CaseFieldValue)
+        .filter(models.CaseFieldValue.case_id == case.id, models.CaseFieldValue.field_key == APPLICANT_TYPE_FIELD_KEY)
+        .first()
+    )
+    return {APPLICANT_TYPE_FIELD_KEY: (value.value if value else "")}
+
+
 def _add_business_days(start: datetime, n: int) -> datetime:
     """Прибавляет n рабочих дней (пропускает субботу/воскресенье)."""
     result = start
@@ -717,6 +743,9 @@ def create_case(
         if not package:
             raise HTTPException(status_code=404, detail="Пакет не найден")
 
+    if data.applicant_type and data.applicant_type not in APPLICANT_TYPE_OPTIONS:
+        raise HTTPException(status_code=400, detail="Некорректное значение типа заявителя")
+
     case = models.Case(
         id=uuid.uuid4(),
         client_name=data.client_name,
@@ -726,6 +755,18 @@ def create_case(
         created_by=current_user.id,
     )
     db.add(case)
+    db.flush()  # получаем case.id для CaseFieldValue ниже, коммитим всё разом
+
+    # "Кто заявитель" — только для направления СВО, только если реально
+    # передано (гражданские дела это поле не трогает, см. _svo_applicant_context).
+    if category.branch == "svo" and data.applicant_type:
+        db.add(models.CaseFieldValue(
+            id=uuid.uuid4(),
+            case_id=case.id,
+            field_key=APPLICANT_TYPE_FIELD_KEY,
+            value=data.applicant_type,
+        ))
+
     db.commit()
     db.refresh(case)
     return case
@@ -1013,6 +1054,7 @@ def generate_documents(
         for f in db.query(models.CaseFieldValue).filter(models.CaseFieldValue.case_id == case_id).all()
     }
     documents_list_text = _format_documents_list(db, data.template_ids)
+    svo_applicant_context = _svo_applicant_context(db, case)
 
     case_dir = os.path.join(STORAGE_CASES_DIR, str(case_id))
     os.makedirs(case_dir, exist_ok=True)
@@ -1039,6 +1081,7 @@ def generate_documents(
         # же запуске генерации.
         # Если значения нет — подставляем пустую строку, чтобы docxtpl не падал.
         context = {}
+        context.update(svo_applicant_context)
         for f in template_fields:
             if f.field_type == "documents_list":
                 context[f.field_key] = documents_list_text
@@ -1155,6 +1198,11 @@ def preview_document(
     documents_list_text = _format_documents_list(db, selected_ids)
 
     context = {}
+    # Тип заявителя (СВО) — управляющая переменная для {% if %} в шаблоне,
+    # а не отображаемое значение, поэтому в отличие от остальных полей она
+    # НЕ оборачивается в ⟪⟫/⟦⟧: обёртка сломала бы сравнение в {% if %}
+    # (шаблон сравнивал бы "⟪жена⟫" == "жена" и никогда бы не совпадал).
+    context.update(_svo_applicant_context(db, case))
     for f in template_fields:
         if f.field_type == "documents_list":
             context[f.field_key] = f"⟪{documents_list_text}⟫"

@@ -130,13 +130,19 @@ class CaseDocument(Base):
 
 class CaseDocumentEdit(Base):
     """Ручные правки текста документа (по абзацам), внесённые в предпросмотре
-    до итоговой генерации. Если запись есть — при генерации текст абзацев
-    берётся отсюда, поверх обычной подстановки полей."""
+    до итоговой генерации. Если запись есть — при генерации берётся docx_file_path
+    (уже применённый .docx, посчитанный на момент сохранения правки) — это и
+    есть источник истины, а не повторный рендер шаблона с попыткой сопоставить
+    абзацы по индексу задним числом (это оказалось ненадёжно: разные рендеры
+    одного шаблона могут дать разное число абзацев из-за {% if %}, и правки
+    по индексу разъезжались, портя документ). paragraphs_json остаётся только
+    для повторного открытия редактора и подсветки — на генерацию не влияет."""
     __tablename__ = "case_document_edits"
     __table_args__ = (UniqueConstraint("case_id", "template_id", name="uq_case_doc_edit"),)
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
     template_id = Column(UUID(as_uuid=True), ForeignKey("templates.id"), nullable=False)
-    paragraphs_json = Column(Text, nullable=False)  # JSON-массив строк — текст абзацев
+    paragraphs_json = Column(Text, nullable=False)  # JSON-массив строк — текст абзацев (для показа/подсветки)
+    docx_file_path = Column(String, nullable=True)  # уже применённый .docx — источник истины для генерации
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

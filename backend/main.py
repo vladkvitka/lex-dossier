@@ -819,16 +819,13 @@ def delete_case(
     if not case:
         raise HTTPException(status_code=404, detail="Дело не найдено")
 
-    # Пробуем убрать файлы сгенерированных документов с диска — best effort,
-    # ошибка удаления файла не должна мешать удалению записей в базе.
-    documents = db.query(models.CaseDocument).filter(models.CaseDocument.case_id == case_id).all()
-    for doc in documents:
-        for path in (doc.docx_file_path, doc.pdf_file_path):
-            if path and os.path.exists(path):
-                try:
-                    os.remove(path)
-                except OSError:
-                    pass
+    # Пробуем убрать файлы дела с диска целиком — best effort, ошибка
+    # удаления не должна мешать удалению записей в базе. Одной папкой
+    # удаляются и сгенерированные документы, и "базовые" файлы ручных
+    # правок (case_document_edits.docx_file_path), которые лежат там же.
+    case_dir = os.path.join(STORAGE_CASES_DIR, str(case_id))
+    if os.path.isdir(case_dir):
+        shutil.rmtree(case_dir, ignore_errors=True)
 
     db.query(models.CaseDocument).filter(models.CaseDocument.case_id == case_id).delete()
     db.query(models.CaseDocumentEdit).filter(models.CaseDocumentEdit.case_id == case_id).delete()
@@ -993,43 +990,69 @@ def _extract_paragraph_texts(docx_path: str) -> List[str]:
     return [p.text for p in doc.paragraphs]
 
 
+def _primary_run(p):
+    """Run абзаца, который лучше всего представляет его форматирование —
+    самый длинный по тексту, а не всегда runs[0] (первый run нередко
+    служебный: пустой / с форматированием-остатком от закладки Word)."""
+    if not p.runs:
+        return None
+    return max(p.runs, key=lambda r: len(r.text or ""))
+
+
+def _set_paragraph_text_preserving_format(p, text: str):
+    """Заменяет весь видимый текст абзаца на text, отдавая его "основному"
+    run'у (см. _primary_run) и опустошая остальные runs — так сохраняется
+    хотя бы формат основного текста абзаца (шрифт/размер/жирность), даже
+    если исходно абзац был собран из нескольких runs."""
+    style_run = _primary_run(p)
+    if style_run is not None:
+        style_run.text = text
+        for extra in p.runs:
+            if extra is not style_run:
+                extra.text = ""
+    else:
+        p.add_run(text)
+
+
+def _strip_markers_in_docx(docx_path: str):
+    """Финальная чистка перед выдачей документа юристу: убирает служебные
+    unicode-метки предпросмотра (⟪⟫/⟦⟧) прямо из текста абзацев уже
+    ГОТОВОГО файла — применяется только к документу, полученному из
+    ручной правки (см. save_document_edit).
+
+    Принципиально отличается от старого подхода ("применить текст правки
+    по индексу к заново отрендеренному документу"): здесь нет сопоставления
+    между ДВУМЯ РАЗНЫМИ версиями документа — мы правим текст абзацев прямо
+    внутри ОДНОГО И ТОГО ЖЕ файла, поэтому число абзацев физически не может
+    разойтись, и документ не может превратиться в пустые страницы."""
+    doc = DocxDocument(docx_path)
+    changed = False
+    for p in doc.paragraphs:
+        original = p.text
+        cleaned = _strip_preview_markers(original)
+        if cleaned != original:
+            _set_paragraph_text_preserving_format(p, cleaned)
+            changed = True
+    if changed:
+        doc.save(docx_path)
+
+
 def _apply_paragraph_texts(docx_path: str, texts: List[str]):
-    """Записывает текст абзацев обратно в реальный .docx, стараясь сохранить
-    форматирование каждого абзаца.
-
-    Важно: форматирование берём не из runs[0], а из САМОГО ДЛИННОГО run
-    исходного абзаца. Причина бага, из-за которого при ручной правке
-    "ломался" шрифт/выравнивание: в реальных .docx-шаблонах первый run
-    абзаца нередко служебный — пустой или содержит устаревшее форматирование
-    (например, остаток от закладки/якоря Word) и отличается от run'а с
-    видимым текстом. Слепое копирование формата runs[0] переносило именно
-    это "чужое" форматирование на весь новый текст абзаца.
-
-    Абзацы предполагаются в строгом соответствии 1:1 с тем, что показывалось
-    в редакторе на фронте (см. startEditDoc — редактирование теперь идёт
-    по одному textarea на абзац, а не одним большим полем, поэтому число
-    абзацев в texts гарантированно совпадает с числом абзацев в документе).
-    Ветки на случай рассинхронизации всё равно оставлены как страховка."""
+    """Legacy-путь: применяет текст абзацев к документу ПО ИНДЕКСУ — так
+    исторически применялись ручные правки, пока не выяснилось, что для
+    этого нужно гарантировать полное структурное совпадение с документом,
+    на основе которого правки делались (см. save_document_edit — там
+    правки теперь применяются сразу к своему собственному "базовому"
+    рендеру, и эта функция для НОВЫХ правок больше не нужна). Оставлена
+    только для отображения уже сохранённых старых записей — на случай,
+    если они существуют в базе с прошлых версий (без docx_file_path)."""
     doc = DocxDocument(docx_path)
     paragraphs = doc.paragraphs
     n_original = len(paragraphs)
     n_new = len(texts)
 
-    def primary_run(p):
-        if not p.runs:
-            return None
-        return max(p.runs, key=lambda r: len(r.text or ""))
-
     for i in range(min(n_original, n_new)):
-        p = paragraphs[i]
-        style_run = primary_run(p)
-        if style_run is not None:
-            style_run.text = texts[i]
-            for extra in p.runs:
-                if extra is not style_run:
-                    extra.text = ""
-        else:
-            p.add_run(texts[i])
+        _set_paragraph_text_preserving_format(paragraphs[i], texts[i])
 
     for i in range(n_new, n_original):
         for run in paragraphs[i].runs:
@@ -1037,7 +1060,7 @@ def _apply_paragraph_texts(docx_path: str, texts: List[str]):
 
     if n_new > n_original and n_original > 0:
         last_p = paragraphs[-1]
-        style_run = primary_run(last_p)
+        style_run = _primary_run(last_p)
         for i in range(n_original, n_new):
             new_p = doc.add_paragraph()
             new_p.paragraph_format.alignment = last_p.paragraph_format.alignment
@@ -1175,32 +1198,36 @@ def generate_documents(
                 detail=f"Не удалось сформировать документ по шаблону «{template.name}»: {e}",
             )
 
-        # Если по этому документу есть ручные правки текста (внесённые в
-        # предпросмотре) — накладываем их поверх обычной подстановки полей.
+        # Если по этому документу есть ручные правки текста — они уже
+        # применены к своему собственному файлу (см. save_document_edit),
+        # просто берём его как есть вместо только что отрендеренного из
+        # шаблона. Так исключается сама возможность рассинхронизации
+        # абзацев между "тем, что видел юрист" и "тем, что генерируется".
         manual_edit = _get_manual_edit(db, case_id, template_id)
-        if manual_edit:
+        if manual_edit and manual_edit.docx_file_path and os.path.exists(manual_edit.docx_file_path):
+            shutil.copyfile(manual_edit.docx_file_path, docx_path)
+            _strip_markers_in_docx(docx_path)
+        elif manual_edit:
+            # Старая запись правки (сохранена до этого обновления, ещё без
+            # docx_file_path) — применяем по индексу с проверкой числа
+            # абзацев, как раньше. Как только юрист пересохранит такую
+            # правку через редактор, у неё появится docx_file_path и она
+            # перейдёт на надёжный путь выше.
             try:
                 texts = [_strip_preview_markers(t) for t in json.loads(manual_edit.paragraphs_json)]
                 current_count = len(_extract_paragraph_texts(docx_path))
                 if len(texts) == current_count:
                     _apply_paragraph_texts(docx_path, texts)
                 else:
-                    # Число абзацев правки не совпадает с тем, что реально
-                    # отрендерилось сейчас (шаблон с {% if %} мог дать другое
-                    # число абзацев при других значениях полей на момент
-                    # правки vs сейчас). Попытка применить правки по индексу
-                    # при таком расхождении корёжит документ — часть абзацев
-                    # затирается пустым текстом. Безопаснее пропустить
-                    # применение и оставить обычную подстановку полей, чем
-                    # отдать юристу документ с пустыми страницами.
                     print(
-                        f"[manual-edit] Пропущено: {current_count} абзацев в документе, "
-                        f"{len(texts)} в сохранённой правке (template_id={template_id})",
+                        f"[manual-edit] Пропущено (устаревшая запись без docx_file_path): "
+                        f"{current_count} абзацев в документе, {len(texts)} в правке "
+                        f"(template_id={template_id}) — переоткройте документ на редактирование "
+                        f"и сохраните правки заново.",
                         file=sys.stderr,
                     )
             except Exception as e:
-                print(f"[manual-edit] Ошибка применения правок: {e}", file=sys.stderr)
-                # если что-то пошло не так — остаётся вариант с подставленными полями
+                print(f"[manual-edit] Ошибка применения устаревшей правки: {e}", file=sys.stderr)
 
         _normalize_font(docx_path)
 
@@ -1265,6 +1292,32 @@ class _PreviewFieldValue(str):
         return self._is_filled
 
 
+def _build_preview_context(
+    db: Session,
+    case: models.Case,
+    template_fields: List[models.TemplateField],
+    values: Dict[str, str],
+    selected_template_ids: List[uuid.UUID],
+) -> dict:
+    """Контекст для рендера документа С метками предпросмотра (⟪⟫/⟦⟧).
+    Общий код для live-предпросмотра и для рендера "базового" файла под
+    ручную правку — раньше эта логика была продублирована в двух местах и
+    успела разъехаться, что и стало одной из причин рассинхронизации."""
+    documents_list_text = _format_documents_list(db, selected_template_ids)
+    context = {}
+    context.update(_svo_applicant_context(db, case))
+    for f in template_fields:
+        if f.field_type == "documents_list":
+            context[f.field_key] = _PreviewFieldValue(f"⟪{documents_list_text}⟫", bool(documents_list_text))
+            continue
+        lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
+        value = values.get(lookup_key)
+        display_value = _display_value_for_field(f.field_type, value) if value else None
+        display_text = f"⟪{display_value}⟫" if display_value else f"⟦не заполнено: {f.label}⟧"
+        context[f.field_key] = _PreviewFieldValue(display_text, bool(display_value))
+    return context
+
+
 @app.post("/api/cases/{case_id}/preview", response_model=PreviewResponse)
 def preview_document(
     case_id: uuid.UUID,
@@ -1298,29 +1351,7 @@ def preview_document(
         .all()
     )
     selected_ids = data.selected_template_ids or [data.template_id]
-    documents_list_text = _format_documents_list(db, selected_ids)
-
-    context = {}
-    # Тип заявителя (СВО) — управляющая переменная для {% if %} в шаблоне,
-    # а не отображаемое значение, поэтому в отличие от остальных полей она
-    # НЕ оборачивается в ⟪⟫/⟦⟧: обёртка сломала бы сравнение в {% if %}
-    # (шаблон сравнивал бы "⟪жена⟫" == "жена" и никогда бы не совпадал).
-    context.update(_svo_applicant_context(db, case))
-    for f in template_fields:
-        if f.field_type == "documents_list":
-            context[f.field_key] = _PreviewFieldValue(f"⟪{documents_list_text}⟫", bool(documents_list_text))
-            continue
-        lookup_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
-        value = data.values.get(lookup_key)
-        display_value = _display_value_for_field(f.field_type, value) if value else None
-        # Пустое поле — служебная метка ⟦...⟧ (подсветится красным на фронте).
-        # Заполненное — метка ⟪...⟫ (подсветится синим): так лавочник видит,
-        # что этот текст — результат подстановки (включая склонение через
-        # фильтры |dative и т.п.), а не исходный текст шаблона, и может
-        # проверить его перед генерацией. В реальный .docx эти метки не
-        # попадают — там значения подставляются без обёртки (см. generate).
-        display_text = f"⟪{display_value}⟫" if display_value else f"⟦не заполнено: {f.label}⟧"
-        context[f.field_key] = _PreviewFieldValue(display_text, bool(display_value))
+    context = _build_preview_context(db, case, template_fields, data.values, selected_ids)
 
     tmp_path = None
     try:
@@ -1348,22 +1379,76 @@ def save_document_edit(
     db: Session = Depends(get_db),
     current_user: models.User = Depends(get_current_user),
 ):
-    """Сохраняет ручную правку текста документа. Учитывается при следующей
-    генерации этого документа (накладывается поверх подстановки полей)."""
+    """Сохраняет ручную правку текста документа.
+
+    Рендерит документ ЗАНОВО (с теми же значениями полей, что сейчас видит
+    юрист — data.values/selected_template_ids, как в /preview), применяет
+    присланный текст абзацев ПРЯМО К ЭТОМУ рендеру и сохраняет получившийся
+    .docx на диск — это и есть docx_file_path, источник истины для будущей
+    генерации. Абзацы применяются к тому же самому файлу, из которого
+    только что взяты, поэтому число абзацев гарантированно совпадает —
+    в отличие от старого подхода, где текст правки накладывался на файл,
+    отрендеренный заново уже НА ГЕНЕРАЦИИ (потенциально другой рендер,
+    другое число абзацев из-за {% if %} — отсюда были пустые страницы)."""
     case = db.query(models.Case).filter(models.Case.id == case_id).first()
     if not case:
         raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    template = db.query(models.Template).filter(models.Template.id == data.template_id).first()
+    if not template:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+
+    template_fields = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.template_id == data.template_id)
+        .all()
+    )
+    selected_ids = data.selected_template_ids or [data.template_id]
+    context = _build_preview_context(db, case, template_fields, data.values, selected_ids)
+
+    case_dir = os.path.join(STORAGE_CASES_DIR, str(case_id))
+    os.makedirs(case_dir, exist_ok=True)
+    edit_docx_path = os.path.join(case_dir, f"_edit_{data.template_id}.docx")
+
+    try:
+        doc = DocxTemplate(template.source_file_path)
+        jinja_env = jinja2.Environment()
+        jinja_env.filters.update(build_preview_filters())
+        doc.render(context, jinja_env)
+        doc.save(edit_docx_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Не удалось построить документ для правки: {e}")
+
+    base_paragraph_count = len(_extract_paragraph_texts(edit_docx_path))
+    if base_paragraph_count != len(data.paragraphs):
+        # Пока юрист редактировал текст, значения полей успели измениться
+        # (например, в другой вкладке) настолько, что число абзацев в
+        # шаблоне теперь другое ({% if %} на другое условие). Применять
+        # правки по индексу в этом случае небезопасно — лучше явно
+        # попросить переоткрыть редактор, чем молча испортить документ.
+        raise HTTPException(
+            status_code=409,
+            detail="Данные дела изменились, пока вы редактировали документ. "
+                   "Откройте документ на редактирование заново и повторите правки.",
+        )
+
+    doc2 = DocxDocument(edit_docx_path)
+    for i, p in enumerate(doc2.paragraphs):
+        _set_paragraph_text_preserving_format(p, data.paragraphs[i])
+    doc2.save(edit_docx_path)
 
     existing = _get_manual_edit(db, case_id, data.template_id)
     paragraphs_json = json.dumps(data.paragraphs, ensure_ascii=False)
     if existing:
         existing.paragraphs_json = paragraphs_json
+        existing.docx_file_path = edit_docx_path
     else:
         db.add(models.CaseDocumentEdit(
             id=uuid.uuid4(),
             case_id=case_id,
             template_id=data.template_id,
             paragraphs_json=paragraphs_json,
+            docx_file_path=edit_docx_path,
         ))
     db.commit()
     return PreviewResponse(paragraphs=data.paragraphs, has_manual_edit=True)
@@ -1378,6 +1463,9 @@ def discard_document_edit(
 ):
     """Отменяет ручные правки — при следующем открытии документ снова
     будет собираться из значений формы."""
+    edit = _get_manual_edit(db, case_id, template_id)
+    if edit and edit.docx_file_path and os.path.exists(edit.docx_file_path):
+        os.remove(edit.docx_file_path)
     db.query(models.CaseDocumentEdit).filter(
         models.CaseDocumentEdit.case_id == case_id,
         models.CaseDocumentEdit.template_id == template_id,

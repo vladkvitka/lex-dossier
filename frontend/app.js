@@ -399,6 +399,15 @@ function docGroupLabel(group){
   return group === 'service' ? 'Служебный' : 'Основной';
 }
 
+function categoryBranch(categoryId){
+  const c = state.categories.find(x => x.id === categoryId);
+  return c ? c.branch : null;
+}
+
+function variantLabel(v){
+  return v === 'serviceman' ? 'военнослужащий' : (v === 'relatives' ? 'родня' : '');
+}
+
 function renderAdminTemplates(){
   const body = document.getElementById('adminTmplBody');
   if (!body) return;
@@ -408,18 +417,113 @@ function renderAdminTemplates(){
   }
   body.innerHTML = state.templates.map(t => {
     const published = t.status === 'published';
+    const isSvoMain = categoryBranch(t.category_id) === 'svo' && t.doc_group !== 'service';
+    const variantBadge = t.variant_group_id
+      ? `<br><span style="font-size:11px;color:var(--navy);">вариант: ${variantLabel(t.applicant_variant)}</span>`
+      : '';
     return `
       <tr>
-        <td>${escapeHtml(t.name)}<br><span style="font-size:11px;color:var(--muted);">${docGroupLabel(t.doc_group)}</span></td>
+        <td>${escapeHtml(t.name)}<br><span style="font-size:11px;color:var(--muted);">${docGroupLabel(t.doc_group)}</span>${variantBadge}</td>
         <td>${escapeHtml(categoryName(t.category_id))}</td>
         <td><span class="badge ${published ? 'badge-published' : 'badge-draft'}">${published ? 'Опубликован' : 'Черновик'}</span></td>
         <td style="text-align:right;white-space:nowrap;">
           <button class="btn btn-sm" onclick="openTemplateFields('${t.id}')">Поля</button>
+          ${isSvoMain ? `<button class="btn btn-sm" onclick="toggleVariantPanel('${t.id}')">Вариант</button>` : ''}
           ${published ? '' : `<button class="btn-primary btn-sm" onclick="publishTemplate('${t.id}')">Опубликовать</button>`}
           <button class="btn btn-sm" style="color:var(--wine);" onclick="deleteTemplateConfirm('${t.id}')">Удалить</button>
         </td>
+      </tr>
+      <tr id="variantPanelRow-${t.id}" style="display:none;">
+        <td colspan="4" style="background:var(--surface-alt);"></td>
       </tr>`;
   }).join('');
+}
+
+function toggleVariantPanel(templateId){
+  const row = document.getElementById(`variantPanelRow-${templateId}`);
+  if (!row) return;
+  const showing = row.style.display !== 'none';
+  // Схлопнуть все остальные открытые панели, чтобы не путаться.
+  document.querySelectorAll('[id^="variantPanelRow-"]').forEach(r => r.style.display = 'none');
+  if (showing) return;
+
+  const t = state.templates.find(x => x.id === templateId);
+  if (!t) return;
+  const cell = row.querySelector('td');
+
+  if (t.variant_group_id){
+    const sibling = state.templates.find(x => x.variant_group_id === t.variant_group_id && x.id !== t.id);
+    cell.innerHTML = `
+      <div style="padding:10px 4px;font-size:13px;">
+        Этот шаблон — вариант «<b>${variantLabel(t.applicant_variant)}</b>» документа
+        «${escapeHtml(t.name)}», связан с шаблоном
+        «${sibling ? escapeHtml(sibling.name) : '—'}» (вариант «${sibling ? variantLabel(sibling.applicant_variant) : '?'}»).
+        Юрист в деле видит их как один пункт списка — подставляется нужный по типу заявителя.
+        <div style="margin-top:8px;">
+          <button class="btn btn-sm" style="color:var(--wine);" onclick="unlinkTemplateVariant('${t.id}')">Отвязать варианты</button>
+        </div>
+      </div>`;
+  } else {
+    const candidates = state.templates.filter(x =>
+      x.id !== t.id && x.category_id === t.category_id && !x.variant_group_id
+    );
+    cell.innerHTML = `
+      <div style="padding:10px 4px;font-size:13px;">
+        Связать «${escapeHtml(t.name)}» как один из двух вариантов документа по типу заявителя
+        (служащий / родня) — юрист увидит один пункт, система сама подставит нужный файл.
+        ${candidates.length ? `
+          <div class="field" style="max-width:420px;margin-top:8px;">
+            <label>Второй шаблон (другой вариант того же документа)</label>
+            <select id="variantSibling-${t.id}">
+              ${candidates.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field" style="max-width:420px;">
+            <label>Этот шаблон («${escapeHtml(t.name)}») — от лица</label>
+            <select id="variantThis-${t.id}">
+              <option value="serviceman">военнослужащего (сам заявитель)</option>
+              <option value="relatives">родственника (жена/мать/отец/брат/сестра)</option>
+            </select>
+          </div>
+          <button class="btn-primary btn-sm" onclick="linkTemplateVariant('${t.id}')">Связать</button>
+        ` : `<div style="color:var(--muted);margin-top:8px;">
+          Нет других несвязанных шаблонов в этой же категории — сначала загрузите второй вариант документа.
+        </div>`}
+      </div>`;
+  }
+  row.style.display = '';
+}
+
+async function linkTemplateVariant(templateId){
+  const siblingSelect = document.getElementById(`variantSibling-${templateId}`);
+  const thisSelect = document.getElementById(`variantThis-${templateId}`);
+  if (!siblingSelect || !thisSelect) return;
+  const otherTemplateId = siblingSelect.value;
+  const thisVariant = thisSelect.value;
+  const otherVariant = thisVariant === 'serviceman' ? 'relatives' : 'serviceman';
+  try {
+    await api(`/templates/${templateId}/link-variant`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ other_template_id: otherTemplateId, this_variant: thisVariant, other_variant: otherVariant })
+    });
+    toast('Варианты связаны');
+    await loadTemplates();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
+}
+
+async function unlinkTemplateVariant(templateId){
+  const ok = window.confirm('Отвязать варианты? Оба шаблона снова станут отдельными пунктами списка документов.');
+  if (!ok) return;
+  try {
+    await api(`/templates/${templateId}/unlink-variant`, { method: 'POST' });
+    toast('Варианты отвязаны');
+    await loadTemplates();
+  } catch (err){
+    toast('Ошибка: ' + err.message);
+  }
 }
 
 async function deleteTemplateConfirm(templateId){
@@ -1136,21 +1240,25 @@ async function createCase(){
   }
 }
 
+let currentCaseAvailableTemplates = [];
+
 async function openCase(caseId){
   try {
     currentCase = await api(`/cases/${caseId}`);
     currentCaseSelectedTemplates = new Set(currentCase.documents.map(d => d.template_id));
 
-    // Если у дела есть пакет и документы ещё не генерировались —
-    // сразу отмечаем шаблоны из пакета, чтобы не выбирать их вручную.
+    // Список опубликованных шаблонов, доступных для выбора в этом деле —
+    // уже разрешённый сервером: своя категория + «общие» категории, и если
+    // у какого-то документа есть варианты по типу заявителя (служащий/
+    // родня), сервер сам оставил только подходящий (см.
+    // /cases/{id}/available-templates и _resolve_case_templates в main.py).
+    currentCaseAvailableTemplates = await api(`/cases/${caseId}/available-templates`);
+
+    // Если у дела есть пакет и документы ещё не генерировались — сразу
+    // отмечаем шаблоны из пакета (тоже уже разрешённые под тип заявителя
+    // этого дела — package_template_ids приходит готовым из /cases/{id}).
     if (currentCase.package_id && !currentCaseSelectedTemplates.size){
-      try {
-        const packages = await api(`/packages?category_id=${currentCase.category_id}`);
-        const pkg = packages.find(p => p.id === currentCase.package_id);
-        if (pkg){
-          pkg.items.forEach(item => currentCaseSelectedTemplates.add(item.template_id));
-        }
-      } catch (e) { /* не критично — просто не предвыберем */ }
+      currentCase.package_template_ids.forEach(id => currentCaseSelectedTemplates.add(id));
     }
 
     document.getElementById('caseTitle').textContent = currentCase.client_name;
@@ -1158,10 +1266,6 @@ async function openCase(caseId){
       categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status) +
       (currentCase.created_by_email ? ' · автор: ' + currentCase.created_by_email : '');
 
-    // Список опубликованных шаблонов, доступных для выбора: своя категория
-    // дела + шаблоны из «общих» категорий (is_universal), которые годятся
-    // для любой категории.
-    if (!state.templates.length) await loadTemplates();
     const available = currentAvailableTemplates();
 
     renderCaseTemplatesBox(available);
@@ -1235,12 +1339,7 @@ function renderCaseTemplatesBox(available){
 }
 
 function currentAvailableTemplates(){
-  if (!currentCase) return [];
-  const universalIds = universalCategoryIds();
-  return state.templates.filter(t =>
-    t.status === 'published' &&
-    (t.category_id === currentCase.category_id || universalIds.has(t.category_id))
-  );
+  return currentCaseAvailableTemplates;
 }
 
 async function onCaseTemplateToggle(){

@@ -264,16 +264,36 @@
           </div>
           <div id="tmplWizFinalFields" style="display:none;">
             <div class="field">
-              <label>Название шаблона</label>
-              <input id="newTmplName" placeholder="Например: Исковое заявление о взыскании">
+              <label>Название документа</label>
+              <input id="newTmplName" placeholder="Например: Жалоба в Администрацию Президента">
             </div>
             <div class="field">
               <label>Описание (необязательно)</label>
               <textarea id="newTmplDescription" rows="2" placeholder="Короткая заметка о шаблоне"></textarea>
             </div>
-            <div class="field">
+            <div class="field" id="tmplLinkedToggleField" style="display:none;">
+              <label style="display:flex;align-items:center;gap:8px;font-weight:600;cursor:pointer;">
+                <input type="checkbox" id="newTmplLinked" onchange="onTmplLinkedToggle()">
+                Связанные документы — два варианта по типу заявителя (текст отличается для военнослужащего и для родни)
+              </label>
+            </div>
+            <div class="field" id="tmplSingleFileField">
               <label>Файл .docx</label>
               <input type="file" id="newTmplFile" accept=".docx">
+            </div>
+            <div id="tmplLinkedFilesFields" style="display:none;">
+              <div class="notice" style="margin-bottom:14px;">
+                Название документа одно на оба файла — под ним юрист увидит один пункт в списке
+                документов дела, система сама подставит нужный файл по указанному в деле заявителю.
+              </div>
+              <div class="field">
+                <label>Файл для военнослужащего (сам заявитель)</label>
+                <input type="file" id="newTmplFileServiceman" accept=".docx">
+              </div>
+              <div class="field">
+                <label>Файл для родственника (жена / мать / отец / брат / сестра)</label>
+                <input type="file" id="newTmplFileRelatives" accept=".docx">
+              </div>
             </div>
             <button class="btn-primary" id="uploadTmplBtn" onclick="uploadTemplate()">Загрузить и найти поля</button>
             <div class="login-error" id="uploadError" style="margin-top:10px;"></div>
@@ -370,6 +390,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=14"></script>
+<script src="app.js?v=15"></script>
 </body>
 </html>

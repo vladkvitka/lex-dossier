@@ -308,6 +308,63 @@ def publish_template(
     return template
 
 
+@app.post("/api/templates/{template_id}/link-variant", response_model=TemplateOut)
+def link_template_variant(
+    template_id: uuid.UUID,
+    data: TemplateVariantLinkRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Связывает два шаблона как варианты ОДНОГО документа по типу
+    заявителя (см. Template.variant_group_id) — юрист в карточке дела
+    будет видеть их как один пункт списка, система сама подставит нужный
+    файл по типу заявителя дела."""
+    if {data.this_variant, data.other_variant} != {"serviceman", "relatives"}:
+        raise HTTPException(status_code=400, detail="Варианты должны быть 'serviceman' и 'relatives' — по одному каждого")
+
+    this_tmpl = db.query(models.Template).filter(models.Template.id == template_id).first()
+    other_tmpl = db.query(models.Template).filter(models.Template.id == data.other_template_id).first()
+    if not this_tmpl or not other_tmpl:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    if this_tmpl.id == other_tmpl.id:
+        raise HTTPException(status_code=400, detail="Нельзя связать шаблон сам с собой")
+    if this_tmpl.category_id != other_tmpl.category_id:
+        raise HTTPException(status_code=400, detail="Варианты должны быть в одной и той же категории/подкатегории")
+
+    category = db.query(models.Category).filter(models.Category.id == this_tmpl.category_id).first()
+    if not category or category.branch != "svo":
+        raise HTTPException(status_code=400, detail="Варианты по типу заявителя имеют смысл только для направления СВО")
+
+    group_id = this_tmpl.variant_group_id or other_tmpl.variant_group_id or uuid.uuid4()
+    this_tmpl.variant_group_id = group_id
+    this_tmpl.applicant_variant = data.this_variant
+    other_tmpl.variant_group_id = group_id
+    other_tmpl.applicant_variant = data.other_variant
+    db.commit()
+    db.refresh(this_tmpl)
+    return this_tmpl
+
+
+@app.post("/api/templates/{template_id}/unlink-variant", response_model=TemplateOut)
+def unlink_template_variant(
+    template_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Отменяет связку вариантов — ОБА шаблона группы (не только этот)
+    снова становятся самостоятельными пунктами списка документов."""
+    this_tmpl = db.query(models.Template).filter(models.Template.id == template_id).first()
+    if not this_tmpl:
+        raise HTTPException(status_code=404, detail="Шаблон не найден")
+    if this_tmpl.variant_group_id:
+        db.query(models.Template).filter(models.Template.variant_group_id == this_tmpl.variant_group_id).update(
+            {"variant_group_id": None, "applicant_variant": None}
+        )
+        db.commit()
+    db.refresh(this_tmpl)
+    return this_tmpl
+
+
 @app.delete("/api/templates/{template_id}")
 def delete_template(
     template_id: uuid.UUID,
@@ -621,21 +678,68 @@ APPLICANT_TYPE_FIELD_KEY = "тип_заявителя"
 APPLICANT_TYPE_OPTIONS = ["военнослужащий", "жена", "мать", "отец", "брат", "сестра"]
 
 
+def _get_case_branch(db: Session, case: models.Case) -> Optional[str]:
+    category = db.query(models.Category).filter(models.Category.id == case.category_id).first()
+    return category.branch if category else None
+
+
+def _get_case_applicant_type(db: Session, case: models.Case) -> Optional[str]:
+    """Значение спец-поля "кто заявитель" для дела (см. APPLICANT_TYPE_FIELD_KEY),
+    или None, если не задано / дело не относится к направлению СВО."""
+    if _get_case_branch(db, case) != "svo":
+        return None
+    value = (
+        db.query(models.CaseFieldValue)
+        .filter(models.CaseFieldValue.case_id == case.id, models.CaseFieldValue.field_key == APPLICANT_TYPE_FIELD_KEY)
+        .first()
+    )
+    return value.value if value else None
+
+
 def _svo_applicant_context(db: Session, case: models.Case) -> dict:
     """Если дело относится к направлению СВО — возвращает {тип_заявителя: значение}
     для подмешивания в контекст рендера КАЖДОГО документа этого дела, независимо
     от того, объявлено ли это поле как TemplateField у конкретного шаблона.
     Для гражданских/административных дел возвращает пустой словарь — поведение
     для этого направления не меняется."""
-    category = db.query(models.Category).filter(models.Category.id == case.category_id).first()
-    if not category or category.branch != "svo":
+    if _get_case_branch(db, case) != "svo":
         return {}
-    value = (
-        db.query(models.CaseFieldValue)
-        .filter(models.CaseFieldValue.case_id == case.id, models.CaseFieldValue.field_key == APPLICANT_TYPE_FIELD_KEY)
-        .first()
-    )
-    return {APPLICANT_TYPE_FIELD_KEY: (value.value if value else "")}
+    return {APPLICANT_TYPE_FIELD_KEY: (_get_case_applicant_type(db, case) or "")}
+
+
+def _wanted_applicant_variant(applicant_type: Optional[str]) -> str:
+    """'военнослужащий' -> вариант документа 'serviceman', любой родственник
+    (жена/мать/отец/брат/сестра) или ещё не выбрано -> 'relatives' по
+    умолчанию (эти варианты текстуально гораздо ближе друг к другу, чем к
+    варианту от лица самого военнослужащего)."""
+    return "serviceman" if applicant_type == "военнослужащий" else "relatives"
+
+
+def _resolve_case_templates(db: Session, case: models.Case, templates: List[models.Template]) -> List[models.Template]:
+    """Сворачивает пары шаблонов-вариантов (Template.variant_group_id) до
+    ОДНОГО представителя на группу — того, что соответствует типу заявителя
+    этого дела. Шаблоны без variant_group_id возвращаются как есть, без
+    изменений. Список templates может содержать шаблоны из разных
+    категорий/групп одновременно — резолвер работает на всём списке сразу."""
+    applicant_type = _get_case_applicant_type(db, case)
+    wanted = _wanted_applicant_variant(applicant_type)
+
+    by_group: Dict[uuid.UUID, List[models.Template]] = {}
+    result = []
+    for t in templates:
+        if not t.variant_group_id:
+            result.append(t)
+            continue
+        by_group.setdefault(t.variant_group_id, []).append(t)
+
+    for group_id, members in by_group.items():
+        match = next((m for m in members if m.applicant_variant == wanted), None)
+        # match может быть None, если админ ещё не доделал пару (например,
+        # у обоих шаблонов группы применён один и тот же вариант по ошибке) —
+        # тогда просто берём первый, чтобы юрист не остался без документа.
+        result.append(match or members[0])
+
+    return result
 
 
 def _add_business_days(start: datetime, n: int) -> datetime:
@@ -678,6 +782,18 @@ def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
         .all()
     )
     creator = db.query(models.User).filter(models.User.id == case.created_by).first()
+
+    package_template_ids = []
+    if case.package_id:
+        pkg_items = (
+            db.query(models.TemplatePackageItem)
+            .filter(models.TemplatePackageItem.package_id == case.package_id)
+            .all()
+        )
+        pkg_template_ids = [item.template_id for item in pkg_items]
+        pkg_templates = db.query(models.Template).filter(models.Template.id.in_(pkg_template_ids)).all()
+        package_template_ids = [t.id for t in _resolve_case_templates(db, case, pkg_templates)]
+
     return CaseDetailOut(
         id=case.id,
         client_name=case.client_name,
@@ -687,6 +803,7 @@ def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
         created_at=case.created_at,
         created_by_name=creator.full_name if creator else None,
         created_by_email=creator.email if creator else None,
+        package_template_ids=package_template_ids,
         fields=[CaseFieldValueOut.model_validate(f) for f in field_values],
         documents=[
             CaseDocumentOut(
@@ -785,6 +902,35 @@ def get_case(
     if _refresh_case_status(case):
         db.commit()
     return _case_to_detail(db, case)
+
+
+@app.get("/api/cases/{case_id}/available-templates", response_model=List[TemplateOut])
+def list_case_available_templates(
+    case_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Список опубликованных шаблонов, которые можно выбрать для этого дела:
+    своя категория дела + шаблоны из «общих» категорий (is_universal), уже
+    с разрешёнными парами вариантов по типу заявителя (см.
+    _resolve_case_templates) — если у документа есть варианты
+    служащий/родня, юрист увидит только ОДИН подходящий пункт."""
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    universal_ids = {
+        c.id for c in db.query(models.Category).filter(models.Category.is_universal == True).all()  # noqa: E712
+    }
+    templates = (
+        db.query(models.Template)
+        .filter(
+            models.Template.status == "published",
+            (models.Template.category_id == case.category_id) | (models.Template.category_id.in_(universal_ids)),
+        )
+        .all()
+    )
+    return _resolve_case_templates(db, case, templates)
 
 
 @app.patch("/api/cases/{case_id}", response_model=CaseDetailOut)

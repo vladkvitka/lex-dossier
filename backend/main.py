@@ -221,26 +221,22 @@ def get_template(
     )
 
 
-@app.post("/api/templates", response_model=TemplateDetailOut)
-def create_template(
-    category_id: uuid.UUID = Form(...),
-    name: str = Form(...),
-    description: Optional[str] = Form(None),
-    file: UploadFile = File(...),
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_admin),
-):
+def _create_template_record(
+    db: Session,
+    category: models.Category,
+    name: str,
+    description: Optional[str],
+    file: UploadFile,
+    current_user: models.User,
+) -> models.Template:
+    """Общая часть загрузки шаблона: сохранить файл на диск, создать
+    запись Template и автоматически найти в нём поля-плейсхолдеры.
+    Используется и для обычной загрузки одного шаблона, и для загрузки
+    связанной пары вариантов (см. create_linked_template_pair)."""
     if not file.filename.lower().endswith(".docx"):
         raise HTTPException(status_code=400, detail="Файл должен быть в формате .docx")
 
-    category = db.query(models.Category).filter(models.Category.id == category_id).first()
-    if not category:
-        raise HTTPException(status_code=404, detail="Категория не найдена")
-    # Группа документа больше не выбирается вручную — она однозначно
-    # определяется направлением категории: "service" -> служебный,
-    # СВО/гражданские -> основной.
     doc_group = "service" if category.branch == "service" else "main"
-
     template_id = uuid.uuid4()
     template_dir = os.path.join(STORAGE_TEMPLATES_DIR, str(template_id))
     os.makedirs(template_dir, exist_ok=True)
@@ -251,7 +247,7 @@ def create_template(
 
     template = models.Template(
         id=template_id,
-        category_id=category_id,
+        category_id=category.id,
         name=name,
         description=description,
         source_file_path=file_path,
@@ -265,9 +261,8 @@ def create_template(
     db.refresh(template)
 
     placeholder_keys = extract_placeholders(file_path)
-    fields = []
     for index, key in enumerate(placeholder_keys):
-        field = models.TemplateField(
+        db.add(models.TemplateField(
             id=uuid.uuid4(),
             template_id=template.id,
             field_key=key,
@@ -276,11 +271,18 @@ def create_template(
             is_required=False,
             is_shared=False,
             sort_order=index,
-        )
-        db.add(field)
-        fields.append(field)
+        ))
     db.commit()
+    return template
 
+
+def _template_to_detail(db: Session, template: models.Template) -> TemplateDetailOut:
+    fields = (
+        db.query(models.TemplateField)
+        .filter(models.TemplateField.template_id == template.id)
+        .order_by(models.TemplateField.sort_order)
+        .all()
+    )
     return TemplateDetailOut(
         id=template.id,
         category_id=template.category_id,
@@ -289,8 +291,69 @@ def create_template(
         status=template.status,
         file_version=template.file_version,
         doc_group=template.doc_group,
+        variant_group_id=template.variant_group_id,
+        applicant_variant=template.applicant_variant,
         fields=[TemplateFieldOut.model_validate(f) for f in fields],
     )
+
+
+@app.post("/api/templates", response_model=TemplateDetailOut)
+def create_template(
+    category_id: uuid.UUID = Form(...),
+    name: str = Form(...),
+    description: Optional[str] = Form(None),
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    template = _create_template_record(db, category, name, description, file, current_user)
+    return _template_to_detail(db, template)
+
+
+@app.post("/api/templates/linked-pair", response_model=List[TemplateDetailOut])
+def create_linked_template_pair(
+    category_id: uuid.UUID = Form(...),
+    name: str = Form(...),
+    description: Optional[str] = Form(None),
+    file_serviceman: UploadFile = File(...),
+    file_relatives: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Загружает СРАЗУ ДВА файла как один "связанный документ" с вариантами
+    по типу заявителя (только для направления СВО): один файл — от лица
+    самого военнослужащего, другой — от лица родственника. Юрист в карточке
+    дела видит ОДИН пункт под именем name; система сама подставляет нужный
+    файл по типу заявителя дела (см. _resolve_case_templates).
+
+    Оба шаблона получают ОДНО и то же (введённое один раз) название — так
+    оно и попадёт в имя скачиваемого файла. Это осознанно: заводить 10
+    разных длинных названий вида "Жалоба ... от военнослужащего в связи
+    с ранением ..." под каждую жизненную ситуацию неудобно и путает —
+    название остаётся простым и коротким, вариативность текста внутри
+    документа скрыта от юриста."""
+    category = db.query(models.Category).filter(models.Category.id == category_id).first()
+    if not category:
+        raise HTTPException(status_code=404, detail="Категория не найдена")
+    if category.branch != "svo":
+        raise HTTPException(status_code=400, detail="Связанные варианты по типу заявителя доступны только для направления СВО")
+
+    tmpl_serviceman = _create_template_record(db, category, name, description, file_serviceman, current_user)
+    tmpl_relatives = _create_template_record(db, category, name, description, file_relatives, current_user)
+
+    group_id = uuid.uuid4()
+    tmpl_serviceman.variant_group_id = group_id
+    tmpl_serviceman.applicant_variant = "serviceman"
+    tmpl_relatives.variant_group_id = group_id
+    tmpl_relatives.applicant_variant = "relatives"
+    db.commit()
+    db.refresh(tmpl_serviceman)
+    db.refresh(tmpl_relatives)
+
+    return [_template_to_detail(db, tmpl_serviceman), _template_to_detail(db, tmpl_relatives)]
 
 
 @app.post("/api/templates/{template_id}/publish", response_model=TemplateOut)
@@ -306,43 +369,6 @@ def publish_template(
     db.commit()
     db.refresh(template)
     return template
-
-
-@app.post("/api/templates/{template_id}/link-variant", response_model=TemplateOut)
-def link_template_variant(
-    template_id: uuid.UUID,
-    data: TemplateVariantLinkRequest,
-    db: Session = Depends(get_db),
-    current_user: models.User = Depends(require_admin),
-):
-    """Связывает два шаблона как варианты ОДНОГО документа по типу
-    заявителя (см. Template.variant_group_id) — юрист в карточке дела
-    будет видеть их как один пункт списка, система сама подставит нужный
-    файл по типу заявителя дела."""
-    if {data.this_variant, data.other_variant} != {"serviceman", "relatives"}:
-        raise HTTPException(status_code=400, detail="Варианты должны быть 'serviceman' и 'relatives' — по одному каждого")
-
-    this_tmpl = db.query(models.Template).filter(models.Template.id == template_id).first()
-    other_tmpl = db.query(models.Template).filter(models.Template.id == data.other_template_id).first()
-    if not this_tmpl or not other_tmpl:
-        raise HTTPException(status_code=404, detail="Шаблон не найден")
-    if this_tmpl.id == other_tmpl.id:
-        raise HTTPException(status_code=400, detail="Нельзя связать шаблон сам с собой")
-    if this_tmpl.category_id != other_tmpl.category_id:
-        raise HTTPException(status_code=400, detail="Варианты должны быть в одной и той же категории/подкатегории")
-
-    category = db.query(models.Category).filter(models.Category.id == this_tmpl.category_id).first()
-    if not category or category.branch != "svo":
-        raise HTTPException(status_code=400, detail="Варианты по типу заявителя имеют смысл только для направления СВО")
-
-    group_id = this_tmpl.variant_group_id or other_tmpl.variant_group_id or uuid.uuid4()
-    this_tmpl.variant_group_id = group_id
-    this_tmpl.applicant_variant = data.this_variant
-    other_tmpl.variant_group_id = group_id
-    other_tmpl.applicant_variant = data.other_variant
-    db.commit()
-    db.refresh(this_tmpl)
-    return this_tmpl
 
 
 @app.post("/api/templates/{template_id}/unlink-variant", response_model=TemplateOut)

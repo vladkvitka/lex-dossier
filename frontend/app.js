@@ -415,111 +415,61 @@ function renderAdminTemplates(){
     body.innerHTML = '<tr><td colspan="4" style="color:var(--muted);">Шаблонов пока нет</td></tr>';
     return;
   }
-  body.innerHTML = state.templates.map(t => {
+
+  const rendered = new Set();
+  const rows = [];
+
+  state.templates.forEach(t => {
+    if (rendered.has(t.id)) return;
+
+    if (t.variant_group_id){
+      // Связанная пара вариантов — одна строка на двоих, одно название.
+      const pair = state.templates.filter(x => x.variant_group_id === t.variant_group_id);
+      pair.forEach(p => rendered.add(p.id));
+      const serviceman = pair.find(p => p.applicant_variant === 'serviceman');
+      const relatives = pair.find(p => p.applicant_variant === 'relatives');
+      const bothPublished = pair.every(p => p.status === 'published');
+      rows.push(`
+        <tr>
+          <td>${escapeHtml(t.name)}<br><span style="font-size:11px;color:var(--navy);">связанные варианты: служащий / родня</span></td>
+          <td>${escapeHtml(categoryName(t.category_id))}</td>
+          <td><span class="badge ${bothPublished ? 'badge-published' : 'badge-draft'}">${bothPublished ? 'Опубликованы' : 'Черновик'}</span></td>
+          <td style="text-align:right;white-space:nowrap;">
+            ${serviceman ? `<button class="btn btn-sm" onclick="openTemplateFields('${serviceman.id}')">Поля (служащий)</button>` : ''}
+            ${relatives ? `<button class="btn btn-sm" onclick="openTemplateFields('${relatives.id}')">Поля (родня)</button>` : ''}
+            ${!bothPublished ? pair.filter(p => p.status !== 'published').map(p =>
+              `<button class="btn-primary btn-sm" onclick="publishTemplate('${p.id}')">Опубликовать (${variantLabel(p.applicant_variant)})</button>`
+            ).join('') : ''}
+            <button class="btn btn-sm" style="color:var(--wine);" onclick="unlinkTemplateVariant('${t.id}')">Разделить</button>
+          </td>
+        </tr>`);
+      return;
+    }
+
+    rendered.add(t.id);
     const published = t.status === 'published';
-    const isSvoMain = categoryBranch(t.category_id) === 'svo' && t.doc_group !== 'service';
-    const variantBadge = t.variant_group_id
-      ? `<br><span style="font-size:11px;color:var(--navy);">вариант: ${variantLabel(t.applicant_variant)}</span>`
-      : '';
-    return `
+    rows.push(`
       <tr>
-        <td>${escapeHtml(t.name)}<br><span style="font-size:11px;color:var(--muted);">${docGroupLabel(t.doc_group)}</span>${variantBadge}</td>
+        <td>${escapeHtml(t.name)}<br><span style="font-size:11px;color:var(--muted);">${docGroupLabel(t.doc_group)}</span></td>
         <td>${escapeHtml(categoryName(t.category_id))}</td>
         <td><span class="badge ${published ? 'badge-published' : 'badge-draft'}">${published ? 'Опубликован' : 'Черновик'}</span></td>
         <td style="text-align:right;white-space:nowrap;">
           <button class="btn btn-sm" onclick="openTemplateFields('${t.id}')">Поля</button>
-          ${isSvoMain ? `<button class="btn btn-sm" onclick="toggleVariantPanel('${t.id}')">Вариант</button>` : ''}
           ${published ? '' : `<button class="btn-primary btn-sm" onclick="publishTemplate('${t.id}')">Опубликовать</button>`}
           <button class="btn btn-sm" style="color:var(--wine);" onclick="deleteTemplateConfirm('${t.id}')">Удалить</button>
         </td>
-      </tr>
-      <tr id="variantPanelRow-${t.id}" style="display:none;">
-        <td colspan="4" style="background:var(--surface-alt);"></td>
-      </tr>`;
-  }).join('');
-}
+      </tr>`);
+  });
 
-function toggleVariantPanel(templateId){
-  const row = document.getElementById(`variantPanelRow-${templateId}`);
-  if (!row) return;
-  const showing = row.style.display !== 'none';
-  // Схлопнуть все остальные открытые панели, чтобы не путаться.
-  document.querySelectorAll('[id^="variantPanelRow-"]').forEach(r => r.style.display = 'none');
-  if (showing) return;
-
-  const t = state.templates.find(x => x.id === templateId);
-  if (!t) return;
-  const cell = row.querySelector('td');
-
-  if (t.variant_group_id){
-    const sibling = state.templates.find(x => x.variant_group_id === t.variant_group_id && x.id !== t.id);
-    cell.innerHTML = `
-      <div style="padding:10px 4px;font-size:13px;">
-        Этот шаблон — вариант «<b>${variantLabel(t.applicant_variant)}</b>» документа
-        «${escapeHtml(t.name)}», связан с шаблоном
-        «${sibling ? escapeHtml(sibling.name) : '—'}» (вариант «${sibling ? variantLabel(sibling.applicant_variant) : '?'}»).
-        Юрист в деле видит их как один пункт списка — подставляется нужный по типу заявителя.
-        <div style="margin-top:8px;">
-          <button class="btn btn-sm" style="color:var(--wine);" onclick="unlinkTemplateVariant('${t.id}')">Отвязать варианты</button>
-        </div>
-      </div>`;
-  } else {
-    const candidates = state.templates.filter(x =>
-      x.id !== t.id && x.category_id === t.category_id && !x.variant_group_id
-    );
-    cell.innerHTML = `
-      <div style="padding:10px 4px;font-size:13px;">
-        Связать «${escapeHtml(t.name)}» как один из двух вариантов документа по типу заявителя
-        (служащий / родня) — юрист увидит один пункт, система сама подставит нужный файл.
-        ${candidates.length ? `
-          <div class="field" style="max-width:420px;margin-top:8px;">
-            <label>Второй шаблон (другой вариант того же документа)</label>
-            <select id="variantSibling-${t.id}">
-              ${candidates.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('')}
-            </select>
-          </div>
-          <div class="field" style="max-width:420px;">
-            <label>Этот шаблон («${escapeHtml(t.name)}») — от лица</label>
-            <select id="variantThis-${t.id}">
-              <option value="serviceman">военнослужащего (сам заявитель)</option>
-              <option value="relatives">родственника (жена/мать/отец/брат/сестра)</option>
-            </select>
-          </div>
-          <button class="btn-primary btn-sm" onclick="linkTemplateVariant('${t.id}')">Связать</button>
-        ` : `<div style="color:var(--muted);margin-top:8px;">
-          Нет других несвязанных шаблонов в этой же категории — сначала загрузите второй вариант документа.
-        </div>`}
-      </div>`;
-  }
-  row.style.display = '';
-}
-
-async function linkTemplateVariant(templateId){
-  const siblingSelect = document.getElementById(`variantSibling-${templateId}`);
-  const thisSelect = document.getElementById(`variantThis-${templateId}`);
-  if (!siblingSelect || !thisSelect) return;
-  const otherTemplateId = siblingSelect.value;
-  const thisVariant = thisSelect.value;
-  const otherVariant = thisVariant === 'serviceman' ? 'relatives' : 'serviceman';
-  try {
-    await api(`/templates/${templateId}/link-variant`, {
-      method: 'POST',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ other_template_id: otherTemplateId, this_variant: thisVariant, other_variant: otherVariant })
-    });
-    toast('Варианты связаны');
-    await loadTemplates();
-  } catch (err){
-    toast('Ошибка: ' + err.message);
-  }
+  body.innerHTML = rows.join('');
 }
 
 async function unlinkTemplateVariant(templateId){
-  const ok = window.confirm('Отвязать варианты? Оба шаблона снова станут отдельными пунктами списка документов.');
+  const ok = window.confirm('Разделить на два независимых шаблона? Юрист снова будет видеть их как два отдельных пункта списка документов.');
   if (!ok) return;
   try {
     await api(`/templates/${templateId}/unlink-variant`, { method: 'POST' });
-    toast('Варианты отвязаны');
+    toast('Варианты разделены');
     await loadTemplates();
   } catch (err){
     toast('Ошибка: ' + err.message);
@@ -565,10 +515,16 @@ function onTmplWizBranchChange(){
   const categoryField = document.getElementById('tmplWizCategoryField');
   const subcategoryField = document.getElementById('tmplWizSubcategoryField');
   const finalFields = document.getElementById('tmplWizFinalFields');
+  const linkedToggleField = document.getElementById('tmplLinkedToggleField');
   tmplWizTargetCategoryId = null;
   categoryField.style.display = 'none';
   subcategoryField.style.display = 'none';
   finalFields.style.display = 'none';
+  linkedToggleField.style.display = branch === 'svo' ? 'block' : 'none';
+  if (branch !== 'svo'){
+    document.getElementById('newTmplLinked').checked = false;
+    onTmplLinkedToggle();
+  }
 
   if (!branch) return;
 
@@ -588,6 +544,12 @@ function onTmplWizBranchChange(){
   categorySelect.innerHTML = '<option value="">— выберите категорию —</option>' +
     tops.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
   categoryField.style.display = 'block';
+}
+
+function onTmplLinkedToggle(){
+  const linked = document.getElementById('newTmplLinked').checked;
+  document.getElementById('tmplSingleFileField').style.display = linked ? 'none' : 'block';
+  document.getElementById('tmplLinkedFilesFields').style.display = linked ? 'block' : 'none';
 }
 
 function onTmplWizCategoryChange(){
@@ -626,14 +588,41 @@ function onTmplWizSubcategoryChange(){
 async function uploadTemplate(){
   const name = document.getElementById('newTmplName').value.trim();
   const description = document.getElementById('newTmplDescription').value.trim();
-  const fileInput = document.getElementById('newTmplFile');
+  const isLinked = document.getElementById('newTmplLinked').checked;
   const errBox = document.getElementById('uploadError');
   errBox.style.display = 'none';
 
-  if (!name || !tmplWizTargetCategoryId || !fileInput.files.length){
-    errBox.textContent = 'Заполните название, пройдите шаги направления/категории и выберите файл .docx';
+  if (!name || !tmplWizTargetCategoryId){
+    errBox.textContent = 'Заполните название и пройдите шаги направления/категории';
     errBox.style.display = 'block';
     return;
+  }
+
+  const form = new FormData();
+  form.append('name', name);
+  form.append('category_id', tmplWizTargetCategoryId);
+  if (description) form.append('description', description);
+
+  let url = '/templates';
+  if (isLinked){
+    const fileServiceman = document.getElementById('newTmplFileServiceman');
+    const fileRelatives = document.getElementById('newTmplFileRelatives');
+    if (!fileServiceman.files.length || !fileRelatives.files.length){
+      errBox.textContent = 'Выберите оба файла — для военнослужащего и для родственника';
+      errBox.style.display = 'block';
+      return;
+    }
+    form.append('file_serviceman', fileServiceman.files[0]);
+    form.append('file_relatives', fileRelatives.files[0]);
+    url = '/templates/linked-pair';
+  } else {
+    const fileInput = document.getElementById('newTmplFile');
+    if (!fileInput.files.length){
+      errBox.textContent = 'Выберите файл .docx';
+      errBox.style.display = 'block';
+      return;
+    }
+    form.append('file', fileInput.files[0]);
   }
 
   const btn = document.getElementById('uploadTmplBtn');
@@ -641,18 +630,16 @@ async function uploadTemplate(){
   btn.textContent = 'Загружаем...';
 
   try {
-    const form = new FormData();
-    form.append('name', name);
-    form.append('category_id', tmplWizTargetCategoryId);
-    if (description) form.append('description', description);
-    form.append('file', fileInput.files[0]);
-
-    await api('/templates', { method: 'POST', body: form });
+    await api(url, { method: 'POST', body: form });
 
     document.getElementById('newTmplName').value = '';
     document.getElementById('newTmplDescription').value = '';
-    fileInput.value = '';
-    toast('Шаблон загружен, поля найдены автоматически');
+    document.getElementById('newTmplFile').value = '';
+    document.getElementById('newTmplFileServiceman').value = '';
+    document.getElementById('newTmplFileRelatives').value = '';
+    document.getElementById('newTmplLinked').checked = false;
+    onTmplLinkedToggle();
+    toast(isLinked ? 'Оба варианта загружены, поля найдены автоматически' : 'Шаблон загружен, поля найдены автоматически');
     await loadTemplates();
   } catch (err){
     errBox.textContent = 'Ошибка загрузки: ' + err.message;

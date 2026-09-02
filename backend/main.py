@@ -1001,17 +1001,25 @@ def _primary_run(p):
 
 def _set_paragraph_text_preserving_format(p, text: str):
     """Заменяет весь видимый текст абзаца на text, отдавая его "основному"
-    run'у (см. _primary_run) и опустошая остальные runs — так сохраняется
-    хотя бы формат основного текста абзаца (шрифт/размер/жирность), даже
-    если исходно абзац был собран из нескольких runs."""
-    style_run = _primary_run(p)
-    if style_run is not None:
-        style_run.text = text
-        for extra in p.runs:
-            if extra is not style_run:
-                extra.text = ""
-    else:
+    run'у (см. _primary_run) и опустошая остальные.
+
+    КРИТИЧНО: p.runs нужно забрать РОВНО ОДИН раз в переменную и дальше
+    работать с этим списком. python-docx возвращает НОВЫЙ список НОВЫХ
+    объектов-обёрток Run при каждом обращении к p.runs — даже если это тот
+    же самый кусок текста в файле. Из-за этого сравнение "extra is not
+    style_run" между результатами ДВУХ РАЗНЫХ обращений к p.runs всегда
+    было ложным (True для абсолютно любого run, включая тот же самый) —
+    именно это стирало вообще весь текст абзаца, а не только "лишние"
+    runs. Баг был обнаружен воспроизведением на реальном файле шаблона."""
+    runs = p.runs
+    if not runs:
         p.add_run(text)
+        return
+    style_run = max(runs, key=lambda r: len(r.text or ""))
+    style_run.text = text
+    for extra in runs:
+        if extra is not style_run:
+            extra.text = ""
 
 
 def _strip_markers_in_docx(docx_path: str):

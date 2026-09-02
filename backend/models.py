@@ -42,6 +42,15 @@ class Template(Base):
     # "main" — основные документы (результат услуги: иски, ходатайства, жалобы),
     # "service" — служебные (договор на оказание услуг, акты и т.п.)
     doc_group = Column(String, default="main")
+    # Вариант документа по типу заявителя (актуально только для направления
+    # СВО): 'serviceman' — от лица самого военнослужащего, 'relatives' —
+    # от лица родственника (жена/мать/отец/брат/сестра). Если заполнено —
+    # у шаблона есть "напарник" с тем же variant_group_id и другим
+    # applicant_variant; юрист в карточке дела видит такую пару как ОДИН
+    # пункт списка документов — систему сама подставляет нужный файл по
+    # типу заявителя дела (см. _resolve_case_templates в main.py).
+    variant_group_id = Column(UUID(as_uuid=True), nullable=True)
+    applicant_variant = Column(String, nullable=True)  # 'serviceman' | 'relatives' | None
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

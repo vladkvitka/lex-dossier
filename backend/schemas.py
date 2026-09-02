@@ -89,9 +89,19 @@ class TemplateOut(BaseModel):
     status: str
     file_version: int
     doc_group: str = "main"
+    variant_group_id: Optional[UUID] = None
+    applicant_variant: Optional[str] = None
 
     class Config:
         from_attributes = True
+
+
+class TemplateVariantLinkRequest(BaseModel):
+    # id второго шаблона в паре — должен быть в той же категории
+    other_template_id: UUID
+    # чем является ТЕКУЩИЙ (из URL) шаблон в этой паре
+    this_variant: str    # 'serviceman' | 'relatives'
+    other_variant: str   # 'serviceman' | 'relatives' — второе значение из пары
 
 
 class TemplateDetailOut(TemplateOut):
@@ -180,6 +190,10 @@ class CaseDocumentOut(BaseModel):
 class CaseDetailOut(CaseOut):
     fields: List[CaseFieldValueOut] = []
     documents: List[CaseDocumentOut] = []
+    # Шаблоны из пакета дела, уже разрешённые под конкретное дело — если
+    # среди них есть варианты по типу заявителя (см. Template.variant_group_id),
+    # тут уже стоит нужный конкретный template_id, а не оба варианта сразу.
+    package_template_ids: List[UUID] = []
 
 
 class GenerateRequest(BaseModel):

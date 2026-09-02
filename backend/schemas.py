@@ -96,14 +96,6 @@ class TemplateOut(BaseModel):
         from_attributes = True
 
 
-class TemplateVariantLinkRequest(BaseModel):
-    # id второго шаблона в паре — должен быть в той же категории
-    other_template_id: UUID
-    # чем является ТЕКУЩИЙ (из URL) шаблон в этой паре
-    this_variant: str    # 'serviceman' | 'relatives'
-    other_variant: str   # 'serviceman' | 'relatives' — второе значение из пары
-
-
 class TemplateDetailOut(TemplateOut):
     fields: List[TemplateFieldOut] = []
 

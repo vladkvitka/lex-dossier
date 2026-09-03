@@ -226,6 +226,7 @@ def get_template(
 _LABEL_ACRONYMS = {"фио", "инн", "снилс", "огрн", "огрнип", "кпп", "смс"}
 
 # Признаки в имени плейсхолдера, по которым угадывается тип поля.
+_TEXTAREA_HINTS = ("описание", "обстоятельства", "фабула")
 _DATE_HINTS = ("дата",)
 _NUMBER_HINTS = ("сумма", "стоимость", "цена", "размер_компенсации", "размер_ущерба", "телефон")
 
@@ -254,6 +255,8 @@ def _guess_field_type(field_key: str) -> str:
     случаев — это только стартовое значение, дальше админ при необходимости
     меняет тип вручную в редакторе полей шаблона."""
     lk = field_key.lower()
+    if any(hint in lk for hint in _TEXTAREA_HINTS):
+        return "textarea"
     if any(hint in lk for hint in _DATE_HINTS):
         return "date"
     if any(hint in lk for hint in _NUMBER_HINTS):

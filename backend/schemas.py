@@ -201,8 +201,13 @@ class PreviewRequest(BaseModel):
     selected_template_ids: List[UUID] = []
 
 
+class ParagraphOut(BaseModel):
+    text: str
+    align: str = "left"  # 'left' | 'center' | 'right' | 'justify' — как в исходном .docx
+
+
 class PreviewResponse(BaseModel):
-    paragraphs: List[str]
+    paragraphs: List[ParagraphOut]
     has_manual_edit: bool = False
 
 

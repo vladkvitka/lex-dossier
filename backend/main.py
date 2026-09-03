@@ -221,6 +221,46 @@ def get_template(
     )
 
 
+# Слова, которые при автогенерации названия поля должны остаться заглавными
+# аббревиатурами (а не "Фио", "Инн" и т.п., как дал бы обычный .capitalize()).
+_LABEL_ACRONYMS = {"фио", "инн", "снилс", "огрн", "огрнип", "кпп", "вч", "смс"}
+
+# Признаки в имени плейсхолдера, по которым угадывается тип поля.
+_DATE_HINTS = ("дата",)
+_NUMBER_HINTS = ("сумма", "стоимость", "цена", "размер_компенсации", "размер_ущерба")
+
+
+def _guess_field_label(field_key: str) -> str:
+    """Название поля по умолчанию из имени плейсхолдера — например,
+    "фио_заявителя" -> "ФИО заявителя", "дата_рождения" -> "Дата рождения".
+    Админ всегда может поправить это вручную в редакторе полей шаблона —
+    это только стартовое значение, чтобы не вводить всё с нуля."""
+    words = field_key.split("_")
+    out = []
+    for i, w in enumerate(words):
+        lw = w.lower()
+        if lw in _LABEL_ACRONYMS:
+            out.append(lw.upper())
+        elif i == 0:
+            out.append(lw.capitalize())
+        else:
+            out.append(lw)
+    return " ".join(out)
+
+
+def _guess_field_type(field_key: str) -> str:
+    """Тип поля по умолчанию из имени плейсхолдера (например, любой ключ со
+    словом "дата" -> поле-календарь). Не претендует на угадывание всех
+    случаев — это только стартовое значение, дальше админ при необходимости
+    меняет тип вручную в редакторе полей шаблона."""
+    lk = field_key.lower()
+    if any(hint in lk for hint in _DATE_HINTS):
+        return "date"
+    if any(hint in lk for hint in _NUMBER_HINTS):
+        return "number"
+    return "text"
+
+
 def _create_template_record(
     db: Session,
     category: models.Category,
@@ -266,8 +306,8 @@ def _create_template_record(
             id=uuid.uuid4(),
             template_id=template.id,
             field_key=key,
-            label=key.replace("_", " ").capitalize(),
-            field_type="text",
+            label=_guess_field_label(key),
+            field_type=_guess_field_type(key),
             is_required=False,
             is_shared=False,
             sort_order=index,

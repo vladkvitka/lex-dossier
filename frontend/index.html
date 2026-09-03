@@ -279,7 +279,7 @@
             </div>
             <div class="field" id="tmplSingleFileField">
               <label>Файл .docx</label>
-              <input type="file" id="newTmplFile" accept=".docx">
+              <input type="file" id="newTmplFile" accept=".docx" onchange="autofillTemplateNameFromFile(this)">
             </div>
             <div id="tmplLinkedFilesFields" style="display:none;">
               <div class="notice" style="margin-bottom:14px;">
@@ -288,11 +288,11 @@
               </div>
               <div class="field">
                 <label>Файл для военнослужащего (сам заявитель)</label>
-                <input type="file" id="newTmplFileServiceman" accept=".docx">
+                <input type="file" id="newTmplFileServiceman" accept=".docx" onchange="autofillTemplateNameFromFile(this)">
               </div>
               <div class="field">
                 <label>Файл для родственника (жена / мать / отец / брат / сестра)</label>
-                <input type="file" id="newTmplFileRelatives" accept=".docx">
+                <input type="file" id="newTmplFileRelatives" accept=".docx" onchange="autofillTemplateNameFromFile(this)">
               </div>
             </div>
             <button class="btn-primary" id="uploadTmplBtn" onclick="uploadTemplate()">Загрузить и найти поля</button>
@@ -390,6 +390,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=15"></script>
+<script src="app.js?v=16"></script>
 </body>
 </html>

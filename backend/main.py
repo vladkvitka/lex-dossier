@@ -44,11 +44,13 @@ from schemas import (
     GenerateRequest,
     PreviewRequest,
     PreviewResponse,
+    ParagraphOut,
     CaseDocumentEditRequest,
 )
 from security import verify_password, create_access_token
 from deps import get_current_user, require_admin
 from docx_utils import extract_placeholders
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from name_utils import build_clean_filters, build_preview_filters
 
 Base.metadata.create_all(bind=engine)
@@ -1205,6 +1207,43 @@ def _extract_paragraph_texts(docx_path: str) -> List[str]:
     return [p.text for p in doc.paragraphs]
 
 
+_ALIGN_MAP = {
+    WD_ALIGN_PARAGRAPH.LEFT: "left",
+    WD_ALIGN_PARAGRAPH.CENTER: "center",
+    WD_ALIGN_PARAGRAPH.RIGHT: "right",
+    WD_ALIGN_PARAGRAPH.JUSTIFY: "justify",
+    WD_ALIGN_PARAGRAPH.JUSTIFY_MED: "justify",
+    WD_ALIGN_PARAGRAPH.JUSTIFY_HI: "justify",
+    WD_ALIGN_PARAGRAPH.JUSTIFY_LOW: "justify",
+    WD_ALIGN_PARAGRAPH.DISTRIBUTE: "justify",
+    WD_ALIGN_PARAGRAPH.THAI_JUSTIFY: "justify",
+}
+
+
+def _paragraph_align(p) -> str:
+    """Выравнивание абзаца — как в исходном .docx: по левому краю, по
+    центру, по правому краю или по ширине. Если не задано прямо на абзаце,
+    смотрим на стиль абзаца (и его цепочку base_style) — многие шаблоны
+    задают выравнивание именно через стиль, а не построчно."""
+    align = p.alignment
+    style = p.style
+    while align is None and style is not None:
+        align = style.paragraph_format.alignment
+        style = style.base_style
+    return _ALIGN_MAP.get(align, "left")
+
+
+def _extract_paragraphs_with_align(docx_path: str) -> List[ParagraphOut]:
+    """То же, что _extract_paragraph_texts, но вместе с выравниванием
+    каждого абзаца — для отображения в веб-предпросмотре "как в оригинале".
+    На сам скачиваемый .docx это никак не влияет: выравнивание абзаца
+    (paragraph_format) мы никогда не трогаем при подстановке/правке текста,
+    оно и так всегда сохранялось верным в итоговом файле — это чисто про
+    то, что видно на экране на сайте."""
+    doc = DocxDocument(docx_path)
+    return [ParagraphOut(text=p.text, align=_paragraph_align(p)) for p in doc.paragraphs]
+
+
 def _primary_run(p):
     """Run абзаца, который лучше всего представляет его форматирование —
     самый длинный по тексту, а не всегда runs[0] (первый run нередко
@@ -1569,7 +1608,18 @@ def preview_document(
 
     manual_edit = _get_manual_edit(db, case_id, data.template_id)
     if manual_edit:
-        return PreviewResponse(paragraphs=json.loads(manual_edit.paragraphs_json), has_manual_edit=True)
+        texts = json.loads(manual_edit.paragraphs_json)
+        aligns = []
+        if manual_edit.docx_file_path and os.path.exists(manual_edit.docx_file_path):
+            try:
+                aligns = [_paragraph_align(p) for p in DocxDocument(manual_edit.docx_file_path).paragraphs]
+            except Exception:
+                aligns = []
+        paragraphs_out = [
+            ParagraphOut(text=t, align=(aligns[i] if i < len(aligns) else "left"))
+            for i, t in enumerate(texts)
+        ]
+        return PreviewResponse(paragraphs=paragraphs_out, has_manual_edit=True)
 
     template_fields = (
         db.query(models.TemplateField)
@@ -1588,7 +1638,7 @@ def preview_document(
         with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
             tmp_path = tmp.name
         doc.save(tmp_path)
-        paragraphs = _extract_paragraph_texts(tmp_path)
+        paragraphs = _extract_paragraphs_with_align(tmp_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Не удалось построить предпросмотр: {e}")
     finally:
@@ -1677,7 +1727,7 @@ def save_document_edit(
             docx_file_path=edit_docx_path,
         ))
     db.commit()
-    return PreviewResponse(paragraphs=data.paragraphs, has_manual_edit=True)
+    return PreviewResponse(paragraphs=_extract_paragraphs_with_align(edit_docx_path), has_manual_edit=True)
 
 
 @app.delete("/api/cases/{case_id}/documents/edit")

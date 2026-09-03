@@ -1069,6 +1069,25 @@ async function deletePackageConfirm(packageId){
 
 let currentCase = null;           // текущее открытое дело (CaseDetailOut)
 let currentCaseSelectedTemplates = new Set(); // выбранные для дела шаблоны (id)
+let templateGroupKeysByTemplateId = {}; // template_id -> [groupKey, ...] — для красных/зелёных индикаторов во вкладках
+
+function updateDocTabCompletionDots(){
+  // Красный кружок у вкладки — пока не заполнено хотя бы одно поле этого
+  // документа, зелёный — когда все его плейсхолдеры заполнены. Смотрим
+  // текущие значения полей прямо из формы (без похода на сервер) — так
+  // индикатор обновляется мгновенно при каждом нажатии клавиши, а не
+  // только после того, как отработает debounce автосохранения/превью.
+  const liveValues = {};
+  document.querySelectorAll('#caseFieldsBox [data-field-key]').forEach(el => {
+    liveValues[el.getAttribute('data-field-key')] = el.value.trim();
+  });
+  document.querySelectorAll('#docTabs .doc-tab[data-doc]').forEach(tabEl => {
+    const templateId = tabEl.dataset.doc;
+    const groupKeys = templateGroupKeysByTemplateId[templateId] || [];
+    const complete = groupKeys.every(k => liveValues[k]);
+    tabEl.classList.toggle('complete', complete);
+  });
+}
 
 async function loadCasesList(){
   state.cases = await api('/cases');
@@ -1367,13 +1386,17 @@ async function renderCaseFieldsForm(available){
   // документов (например «ФИО доверителя») превращаются в одно поле формы.
   const selected = available.filter(t => currentCaseSelectedTemplates.has(t.id));
   const fieldsByGroupKey = new Map();
+  templateGroupKeysByTemplateId = {}; // template_id -> [groupKey, ...] — для индикаторов во вкладках
   for (const t of selected){
     const detail = await api(`/templates/${t.id}`);
+    const groupKeysForThisTemplate = [];
     for (const f of detail.fields){
       if (f.field_type === 'documents_list') continue; // заполняется автоматически, в форму не выводим
       const groupKey = (f.is_shared && f.shared_group_key) ? f.shared_group_key : f.field_key;
       if (!fieldsByGroupKey.has(groupKey)) fieldsByGroupKey.set(groupKey, f);
+      groupKeysForThisTemplate.push(groupKey);
     }
+    templateGroupKeysByTemplateId[t.id] = groupKeysForThisTemplate;
   }
 
   const existingValues = {};
@@ -1387,6 +1410,7 @@ async function renderCaseFieldsForm(available){
           ${caseFieldInputHtml(f, groupKey, existingValues[groupKey] || '')}
         </div>`).join('')
     : '<div style="color:var(--muted);">В выбранных документах не найдено полей</div>';
+  updateDocTabCompletionDots();
 }
 
 function caseFieldInputHtml(f, groupKey, value){
@@ -1485,6 +1509,7 @@ function renderCaseDocTabs(available){
     <div class="doc-tab ${t.id === currentDocTabId ? 'active' : ''}" data-doc="${t.id}" onclick="selectDocTab('${t.id}')">
       <span class="dot"></span>${escapeHtml(t.name)}
     </div>`).join('');
+  updateDocTabCompletionDots();
 
   isEditingDoc = false;
   refreshPreview();
@@ -1515,6 +1540,11 @@ let fieldsAutoSaveTimer = null;
 
 function scheduleRefreshPreview(){
   if (isEditingDoc) return; // пока правим текст руками — не затираем правки живым рендером по полям
+
+  // Красный/зелёный индикатор во вкладках — мгновенно, без debounce: это
+  // просто чтение текущих значений полей из DOM, сеть не нужна.
+  updateDocTabCompletionDots();
+
   clearTimeout(previewDebounceTimer);
   previewDebounceTimer = setTimeout(refreshPreview, 500);
 
@@ -1563,7 +1593,7 @@ function highlightGaps(text){
 function renderDocBodyReadOnly(paragraphs){
   const docBody = document.getElementById('docBody');
   docBody.innerHTML = paragraphs.length
-    ? paragraphs.map(p => `<p>${p.trim() ? highlightGaps(p) : '&nbsp;'}</p>`).join('')
+    ? paragraphs.map(p => `<p style="text-align:${p.align || 'left'};">${p.text.trim() ? highlightGaps(p.text) : '&nbsp;'}</p>`).join('')
     : '<div class="doc-body-empty">В документе не найдено текстовых абзацев</div>';
 }
 
@@ -1637,7 +1667,8 @@ function startEditDoc(){
     const ta = document.createElement('textarea');
     ta.className = 'doc-edit-paragraph';
     ta.style.cssText = 'width:100%;min-height:40px;border:1px solid var(--border);border-radius:8px;padding:10px 14px;font-family:var(--font-doc);font-size:14.5px;line-height:1.7;resize:none;overflow:hidden;';
-    ta.value = p;
+    ta.style.textAlign = p.align || 'left';
+    ta.value = p.text;
     ta.addEventListener('input', () => autoGrowTextarea(ta));
     wrap.appendChild(ta);
   });

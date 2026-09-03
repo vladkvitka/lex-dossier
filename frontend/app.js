@@ -585,6 +585,17 @@ function onTmplWizSubcategoryChange(){
   finalFields.style.display = 'block';
 }
 
+function autofillTemplateNameFromFile(input){
+  // Подставляет название документа из имени выбранного файла — но только
+  // если поле названия ещё пустое: если админ уже что-то туда вписал (или
+  // это второй файл в связанной паре, а название уже подтянулось от
+  // первого), ничего не перезатираем.
+  const nameField = document.getElementById('newTmplName');
+  if (nameField.value.trim() || !input.files.length) return;
+  const raw = input.files[0].name.replace(/\.docx$/i, '');
+  nameField.value = raw.replace(/[_\-]+/g, ' ').trim();
+}
+
 async function uploadTemplate(){
   const name = document.getElementById('newTmplName').value.trim();
   const description = document.getElementById('newTmplDescription').value.trim();

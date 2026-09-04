@@ -1464,7 +1464,8 @@ async function saveCaseFields(opts = {}){
 let currentDocTabId = null;
 let previewDebounceTimer = null;
 let isEditingDoc = false;
-let lastPreviewParagraphs = [];   // текущие абзацы активной вкладки (как пришли с сервера)
+let lastPreviewParagraphs = [];   // текущие абзацы активной вкладки (как пришли с сервера) — только для правки
+let lastPreviewBlocks = [];       // абзацы И таблицы вместе, в реальном порядке — только для чтения (см. renderDocBodyReadOnly)
 let lastPreviewHasManualEdit = false;
 
 let currentDocGroup = 'main';   // активная вкладка верхнего уровня: 'main' | 'service'
@@ -1590,11 +1591,22 @@ function highlightGaps(text){
   return html;
 }
 
-function renderDocBodyReadOnly(paragraphs){
+function renderDocBodyReadOnly(blocks){
   const docBody = document.getElementById('docBody');
-  docBody.innerHTML = paragraphs.length
-    ? paragraphs.map(p => `<p style="text-align:${p.align || 'left'};">${p.text.trim() ? highlightGaps(p.text) : '&nbsp;'}</p>`).join('')
-    : '<div class="doc-body-empty">В документе не найдено текстовых абзацев</div>';
+  if (!blocks || !blocks.length){
+    docBody.innerHTML = '<div class="doc-body-empty">В документе не найдено текстовых абзацев</div>';
+    return;
+  }
+  docBody.innerHTML = blocks.map(b => {
+    if (b.type === 'table'){
+      return `<table class="doc-table"><tbody>${
+        b.rows.map(row => `<tr>${
+          row.map(cellText => `<td>${cellText.trim() ? highlightGaps(cellText) : '&nbsp;'}</td>`).join('')
+        }</tr>`).join('')
+      }</tbody></table>`;
+    }
+    return `<p style="text-align:${b.align || 'left'};">${b.text.trim() ? highlightGaps(b.text) : '&nbsp;'}</p>`;
+  }).join('');
 }
 
 async function refreshPreview(){
@@ -1618,8 +1630,9 @@ async function refreshPreview(){
       })
     });
     lastPreviewParagraphs = result.paragraphs;
+    lastPreviewBlocks = result.blocks;
     lastPreviewHasManualEdit = result.has_manual_edit;
-    renderDocBodyReadOnly(lastPreviewParagraphs);
+    renderDocBodyReadOnly(lastPreviewBlocks);
     setEditModeUI(false, lastPreviewHasManualEdit);
   } catch (err){
     docBody.innerHTML = `<div class="doc-body-empty">Не удалось построить предпросмотр: ${escapeHtml(err.message)}</div>`;
@@ -1681,7 +1694,7 @@ function startEditDoc(){
 
 function cancelEditDoc(){
   isEditingDoc = false;
-  renderDocBodyReadOnly(lastPreviewParagraphs);
+  renderDocBodyReadOnly(lastPreviewBlocks);
   setEditModeUI(false, lastPreviewHasManualEdit);
 }
 
@@ -1711,9 +1724,10 @@ async function saveEditDoc(){
       })
     });
     lastPreviewParagraphs = result.paragraphs;
+    lastPreviewBlocks = result.blocks;
     lastPreviewHasManualEdit = result.has_manual_edit;
     isEditingDoc = false;
-    renderDocBodyReadOnly(lastPreviewParagraphs);
+    renderDocBodyReadOnly(lastPreviewBlocks);
     setEditModeUI(false, true);
     markCaseHasPendingChanges();
     toast('Правки сохранены — учтутся при генерации документа');

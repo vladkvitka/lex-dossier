@@ -121,6 +121,8 @@ tr:last-child td{border-bottom:none;}
 .doc-body{padding:26px 34px;font-family:var(--font-doc);font-size:14.5px;line-height:1.85;color:var(--ink);max-width:680px;}
 .doc-body p{margin:0 0 14px;}
 .doc-body-empty{padding:40px;color:var(--muted);font-size:13.5px;text-align:center;}
+.doc-table{border-collapse:collapse;width:100%;margin:0 0 14px;font-size:14px;}
+.doc-table td{border:1px solid var(--border);padding:6px 10px;vertical-align:top;}
 .gap{background:var(--wine-soft);color:var(--wine);padding:1px 5px;border-radius:3px;font-family:var(--font-body);font-size:12px;font-weight:600;}
 /* Синяя подсветка подставленного значения — тот же шрифт, что и весь
    остальной текст документа (Times), только цвет и жирность отличают её. */

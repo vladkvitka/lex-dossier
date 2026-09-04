@@ -45,6 +45,7 @@ from schemas import (
     PreviewRequest,
     PreviewResponse,
     ParagraphOut,
+    DocBlockOut,
     CaseDocumentEditRequest,
 )
 from security import verify_password, create_access_token
@@ -1244,6 +1245,43 @@ def _extract_paragraphs_with_align(docx_path: str) -> List[ParagraphOut]:
     return [ParagraphOut(text=p.text, align=_paragraph_align(p)) for p in doc.paragraphs]
 
 
+def _iter_body_block_items(doc):
+    """Абзацы и таблицы тела документа В ТОМ ПОРЯДКЕ, в котором они реально
+    идут в файле. doc.paragraphs и doc.tables по отдельности этого не дают —
+    это два независимых плоских списка, из которых не восстановить, что,
+    например, таблица стоит между третьим и четвёртым абзацем."""
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+    from docx.oxml.ns import qn
+
+    for child in doc.element.body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield Paragraph(child, doc)
+        elif child.tag == qn("w:tbl"):
+            yield Table(child, doc)
+
+
+def _extract_body_blocks(docx_path: str) -> List[DocBlockOut]:
+    """Абзацы и таблицы вместе, для отображения документа В ПОЛНОМ ВИДЕ в
+    веб-предпросмотре (только для чтения — правка текста по-прежнему
+    работает лишь с обычными абзацами, см. _extract_paragraphs_with_align).
+    Про объединённые ячейки: python-docx отдаёт одну и ту же ячейку
+    несколько раз подряд в строке — сознательно не убираем дубликаты,
+    чтобы не городить отдельную логику colspan только ради предпросмотра."""
+    from docx.table import Table
+    from docx.text.paragraph import Paragraph
+
+    doc = DocxDocument(docx_path)
+    blocks: List[DocBlockOut] = []
+    for item in _iter_body_block_items(doc):
+        if isinstance(item, Paragraph):
+            blocks.append(DocBlockOut(type="paragraph", text=item.text, align=_paragraph_align(item)))
+        elif isinstance(item, Table):
+            rows = [[cell.text for cell in row.cells] for row in item.rows]
+            blocks.append(DocBlockOut(type="table", rows=rows))
+    return blocks
+
+
 def _primary_run(p):
     """Run абзаца, который лучше всего представляет его форматирование —
     самый длинный по тексту, а не всегда runs[0] (первый run нередко
@@ -1610,16 +1648,19 @@ def preview_document(
     if manual_edit:
         texts = json.loads(manual_edit.paragraphs_json)
         aligns = []
+        blocks = []
         if manual_edit.docx_file_path and os.path.exists(manual_edit.docx_file_path):
             try:
                 aligns = [_paragraph_align(p) for p in DocxDocument(manual_edit.docx_file_path).paragraphs]
+                blocks = _extract_body_blocks(manual_edit.docx_file_path)
             except Exception:
                 aligns = []
+                blocks = []
         paragraphs_out = [
             ParagraphOut(text=t, align=(aligns[i] if i < len(aligns) else "left"))
             for i, t in enumerate(texts)
         ]
-        return PreviewResponse(paragraphs=paragraphs_out, has_manual_edit=True)
+        return PreviewResponse(paragraphs=paragraphs_out, has_manual_edit=True, blocks=blocks)
 
     template_fields = (
         db.query(models.TemplateField)
@@ -1639,13 +1680,14 @@ def preview_document(
             tmp_path = tmp.name
         doc.save(tmp_path)
         paragraphs = _extract_paragraphs_with_align(tmp_path)
+        blocks = _extract_body_blocks(tmp_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Не удалось построить предпросмотр: {e}")
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-    return PreviewResponse(paragraphs=paragraphs, has_manual_edit=False)
+    return PreviewResponse(paragraphs=paragraphs, has_manual_edit=False, blocks=blocks)
 
 
 @app.put("/api/cases/{case_id}/documents/edit", response_model=PreviewResponse)
@@ -1727,7 +1769,11 @@ def save_document_edit(
             docx_file_path=edit_docx_path,
         ))
     db.commit()
-    return PreviewResponse(paragraphs=_extract_paragraphs_with_align(edit_docx_path), has_manual_edit=True)
+    return PreviewResponse(
+        paragraphs=_extract_paragraphs_with_align(edit_docx_path),
+        has_manual_edit=True,
+        blocks=_extract_body_blocks(edit_docx_path),
+    )
 
 
 @app.delete("/api/cases/{case_id}/documents/edit")

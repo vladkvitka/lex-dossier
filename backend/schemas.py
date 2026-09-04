@@ -206,9 +206,24 @@ class ParagraphOut(BaseModel):
     align: str = "left"  # 'left' | 'center' | 'right' | 'justify' — как в исходном .docx
 
 
+class DocBlockOut(BaseModel):
+    """Один блок тела документа для отображения В ПОЛНОМ ВИДЕ (абзацы И
+    таблицы, в том порядке, в котором они реально идут в файле) — только
+    для чтения. type == "paragraph": используются text/align. type ==
+    "table": используется rows (список строк, каждая — список текстов
+    ячеек). Правка текста по-прежнему работает только с обычными абзацами
+    (см. ParagraphOut/paragraphs ниже) — таблицы в редакторе не
+    редактируются, только показываются такими, какие они есть."""
+    type: str  # "paragraph" | "table"
+    text: Optional[str] = None
+    align: Optional[str] = None
+    rows: Optional[List[List[str]]] = None
+
+
 class PreviewResponse(BaseModel):
     paragraphs: List[ParagraphOut]
     has_manual_edit: bool = False
+    blocks: List[DocBlockOut] = []
 
 
 class CaseDocumentEditRequest(BaseModel):

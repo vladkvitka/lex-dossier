@@ -1458,10 +1458,16 @@ function caseFieldInputHtml(f, groupKey, value){
     return `<textarea rows="3" data-field-key="${key}" oninput="scheduleRefreshPreview()">${val}</textarea>`;
   }
   if (f.field_type === 'date'){
-    // value дела хранится как обычный текст — если это не ISO-дата
-    // (yyyy-mm-dd), нативный date-picker её не примет, оставляем поле
-    // пустым, а не подставляем нечитаемое значение.
-    const isoVal = /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : '';
+    // value дела хранится как ISO (yyyy-mm-dd) — так его понимает нативный
+    // date-picker. Но на случай, если в базе всё же осталось значение в
+    // привычном ДД.ММ.ГГГГ (например, из старой записи до исправления
+    // формата в промпте ИИ) — распознаём и такой вид тоже, а не просто
+    // показываем пустое поле там, где данные на самом деле есть.
+    const isoMatch = /^\d{4}-\d{2}-\d{2}$/.test(value);
+    const ruMatch = value.match(/^(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{4})$/);
+    let isoVal = '';
+    if (isoMatch) isoVal = value;
+    else if (ruMatch) isoVal = `${ruMatch[3]}-${ruMatch[2].padStart(2,'0')}-${ruMatch[1].padStart(2,'0')}`;
     return `<input type="date" data-field-key="${key}" value="${isoVal}" oninput="scheduleRefreshPreview()">`;
   }
   if (f.field_type === 'number' || f.field_type === 'money'){

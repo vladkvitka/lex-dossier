@@ -9,14 +9,16 @@ import uuid
 import zipfile
 import io
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 
 from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import or_
 from docxtpl import DocxTemplate
 from docx import Document as DocxDocument
 import jinja2
+import httpx
 
 from database import Base, engine, get_db
 import models
@@ -47,6 +49,19 @@ from schemas import (
     ParagraphOut,
     DocBlockOut,
     CaseDocumentEditRequest,
+    ExtractFieldsRequest,
+    ExtractedFieldResult,
+    ExtractFieldsResponse,
+    AiModelInfo,
+    AiSettingsOut,
+    AiSettingsUpdate,
+    AiRequestLogOut,
+    AIFieldRecipeOut,
+    AIFieldRecipeUpdate,
+    DraftFieldsRequest,
+    FactItemOut,
+    DraftedFieldResult,
+    DraftFieldsResponse,
 )
 from security import verify_password, create_access_token
 from deps import get_current_user, require_admin
@@ -60,6 +75,84 @@ app = FastAPI()
 
 STORAGE_TEMPLATES_DIR = "/var/lex-dossier/storage/templates"
 STORAGE_CASES_DIR = "/var/lex-dossier/storage/cases"
+
+# ---------- ИИ (OpenRouter) ----------
+# Ключ — только из переменных окружения (.env на сервере), никогда не
+# хардкодится в коде. Модель, в отличие от ключа, НЕ берётся из .env, а
+# хранится в базе (таблица app_settings, ключ AI_MODEL_SETTING_KEY) — админ
+# переключает её через экран "Настройки ИИ" для тестирования разных моделей
+# без правки .env и перезапуска сервиса. Значение из .env используется
+# только как запасной вариант, если в базе ещё ничего не выбрано.
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+DEFAULT_AI_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
+AI_MODEL_SETTING_KEY = "ai_extract_model"
+
+# Каталог моделей, из которых админ может выбирать в разделе "Настройки ИИ".
+# Цены — ОРИЕНТИРОВОЧНЫЕ (актуальны на момент написания кода, у OpenRouter
+# меняются без предупреждения) — используются только для прикидочной оценки
+# расходов внутри интерфейса, не для биллинга. Перед принятием решения по
+# бюджету сверяться с https://openrouter.ai/models. Список сознательно
+# ограничен моделями, реально подходящими под задачу (извлечение структурных
+# данных из текста + JSON на выходе) — не все модели каждого провайдера,
+# а по 2-3 самых уместных: одна экономичная "рабочая лошадка" и одна более
+# мощная на случай, если дешёвая модель начнёт ошибаться на сложных фабулах.
+AI_MODEL_CATALOG = [
+    {"slug": "anthropic/claude-haiku-4.5", "provider": "Anthropic", "label": "Claude Haiku 4.5",
+     "price_in": 1.00, "price_out": 5.00, "note": "Быстрая и дешёвая, хорошая точка старта"},
+    {"slug": "anthropic/claude-sonnet-4.6", "provider": "Anthropic", "label": "Claude Sonnet 4.6",
+     "price_in": 3.00, "price_out": 15.00, "note": "Если Haiku начнёт ошибаться на сложных фабулах"},
+    {"slug": "openai/gpt-5-mini", "provider": "OpenAI", "label": "GPT-5 Mini",
+     "price_in": 0.25, "price_out": 2.00, "note": "Экономичный вариант от OpenAI"},
+    {"slug": "openai/gpt-5", "provider": "OpenAI", "label": "GPT-5",
+     "price_in": 1.25, "price_out": 10.00, "note": None},
+    {"slug": "deepseek/deepseek-v4-flash", "provider": "DeepSeek", "label": "DeepSeek V4 Flash",
+     "price_in": 0.05, "price_out": 0.10, "note": "Самый дешёвый вариант в списке — стоит проверить качество на реальных фабулах перед массовым использованием"},
+    {"slug": "deepseek/deepseek-v4-pro", "provider": "DeepSeek", "label": "DeepSeek V4 Pro",
+     "price_in": 0.60, "price_out": 1.75, "note": None},
+    {"slug": "google/gemini-3-flash-preview", "provider": "Google", "label": "Gemini 3 Flash",
+     "price_in": 0.50, "price_out": 3.00, "note": None},
+]
+
+# Для расчётной стоимости одного обращения используем усреднённый размер
+# запроса именно ДЛЯ ЭТОГО сценария (разбор фабулы + список простых полей) —
+# не общий "средний запрос в интернете". Прикидка: системный промпт с
+# перечнем полей + текст фабулы среднего объёма (typically ~250-400 слов) —
+# около 1500 токенов на входе; JSON-ответ на 10-15 полей — около 400 токенов
+# на выходе. Если реальные промпты станут заметно длиннее/короче — эти два
+# числа стоит поправить, оценка пересчитается автоматически везде.
+AI_COST_ESTIMATE_PROMPT_TOKENS = 1500
+AI_COST_ESTIMATE_COMPLETION_TOKENS = 400
+
+
+def _estimate_call_cost(price_in: float, price_out: float) -> float:
+    return (
+        AI_COST_ESTIMATE_PROMPT_TOKENS / 1_000_000 * price_in
+        + AI_COST_ESTIMATE_COMPLETION_TOKENS / 1_000_000 * price_out
+    )
+
+
+def _get_ai_model(db: Session) -> str:
+    setting = db.query(models.AppSetting).filter(models.AppSetting.key == AI_MODEL_SETTING_KEY).first()
+    return (setting.value if setting and setting.value else None) or DEFAULT_AI_MODEL
+
+
+# Простые поля — то, что ИИ-разбор заполняет на этом этапе (этап 1). Поля
+# типа 'textarea' сюда намеренно НЕ входят: это как раз составные поля вроде
+# "обстоятельств дела"/"хронологии" (см. _TEXTAREA_HINTS выше по файлу) —
+# для них нужен отдельный, более сложный двухшаговый разбор, это следующий
+# этап, не смешиваем с простым извлечением фактов.
+AI_SIMPLE_FIELD_TYPES = ("text", "date", "number", "money")
+
+# Запасная инструкция для составного поля, если админ ещё не настроил для
+# него персональный рецепт в разделе "Рецепты ИИ" — чтобы функция работала
+# "из коробки" сразу после установки, а не требовала обязательной настройки
+# админом перед первым использованием.
+DEFAULT_FIELD_RECIPE_INSTRUCTIONS = (
+    "Опиши связным текстом в стиле официального юридического документа, используя только "
+    "перечисленные факты. Если фактов недостаточно — напиши то, что есть, не додумывай "
+    "недостающее."
+)
 
 
 @app.get("/")
@@ -876,6 +969,7 @@ def _case_to_detail(db: Session, case: models.Case) -> CaseDetailOut:
         created_by_name=creator.full_name if creator else None,
         created_by_email=creator.email if creator else None,
         package_template_ids=package_template_ids,
+        raw_narrative=case.raw_narrative,
         fields=[CaseFieldValueOut.model_validate(f) for f in field_values],
         documents=[
             CaseDocumentOut(
@@ -1022,6 +1116,8 @@ def update_case(
         # _refresh_case_status) — ручная установка через PATCH остаётся для
         # редких случаев (например, админ хочет досрочно заархивировать).
         case.status = data.status
+    if data.raw_narrative is not None:
+        case.raw_narrative = data.raw_narrative
     db.commit()
     db.refresh(case)
     return _case_to_detail(db, case)
@@ -1076,6 +1172,18 @@ def update_case_fields(
         )
         if existing:
             existing.value = value
+            # Этот эндпоинт вызывается ТОЛЬКО из формы, которую руками
+            # заполняет юрист (автосохранение по вводу) — значит, если
+            # значение сюда пришло, юрист его либо ввёл сам, либо увидел
+            # предложенное ИИ и оставил/поправил осознанно. В обоих случаях
+            # это равносильно подтверждению: снимаем "предложено ИИ" и
+            # ставим "подтверждено человеком", чтобы бейдж в форме погас, а
+            # следующий разбор через ИИ не перезаписал это поле молча (см.
+            # extract_fields_from_narrative — он не трогает подтверждённые
+            # поля).
+            existing.is_ai_generated = False
+            existing.is_confirmed_by_user = True
+            existing.ai_source_snippet = None
         else:
             db.add(
                 models.CaseFieldValue(
@@ -1083,10 +1191,622 @@ def update_case_fields(
                     case_id=case_id,
                     field_key=field_key,
                     value=value,
+                    is_ai_generated=False,
+                    is_confirmed_by_user=True,
                 )
             )
     db.commit()
     return _case_to_detail(db, case)
+
+
+# ---------- ИИ-разбор фабулы (этап 1) ----------
+
+def _collect_ai_fields_by_type(db: Session, templates: List[models.Template], field_types: tuple) -> List[dict]:
+    """Общая версия _collect_simple_ai_fields, параметризованная по типам
+    полей — используется и для простых полей (см. ниже), и для составных
+    (textarea) в этапе 3, чтобы не дублировать логику дедупликации по
+    shared_group_key дважды."""
+    by_group_key: Dict[str, dict] = {}
+    for t in templates:
+        fields = (
+            db.query(models.TemplateField)
+            .filter(
+                models.TemplateField.template_id == t.id,
+                models.TemplateField.field_type.in_(field_types),
+            )
+            .all()
+        )
+        for f in fields:
+            group_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
+            if group_key not in by_group_key:
+                by_group_key[group_key] = {
+                    "group_key": group_key,
+                    "field_key": f.field_key,
+                    "label": f.label,
+                    "field_type": f.field_type,
+                }
+    return list(by_group_key.values())
+
+
+def _collect_simple_ai_fields(db: Session, templates: List[models.Template]) -> List[dict]:
+    """Простые поля (см. AI_SIMPLE_FIELD_TYPES) — этап 1 разбора."""
+    return _collect_ai_fields_by_type(db, templates, AI_SIMPLE_FIELD_TYPES)
+
+
+def _collect_textarea_ai_fields(db: Session, templates: List[models.Template]) -> List[dict]:
+    """Составные (textarea) поля — этап 3 разбора (хронология, обстоятельства и т.п.)."""
+    return _collect_ai_fields_by_type(db, templates, ("textarea",))
+
+
+def _build_extract_system_prompt(fields: List[dict]) -> str:
+    field_lines = "\n".join(f"- {f['group_key']} — {f['label']} ({f['field_type']})" for f in fields)
+    return (
+        "Ты — ассистент юриста. Тебе дан сырой текст фабулы дела клиента юридической компании.\n"
+        "Твоя задача — найти в тексте значения для перечисленных ниже полей и вернуть СТРОГО JSON, "
+        "без пояснений, без markdown-разметки и без обёртки в ```.\n\n"
+        "Список полей (ключ — название — тип):\n"
+        f"{field_lines}\n\n"
+        "Правила:\n"
+        "1. Если значение поля явно есть в тексте — впиши его в \"value\" в чистом виде, без лишних слов "
+        "(для дат — в формате ДД.ММ.ГГГГ, если в тексте не указано иначе).\n"
+        "2. Если значения в тексте нет — верни \"value\": \"\" (пустая строка). НИКОГДА не придумывай и не "
+        "додумывай данные, которых нет в тексте.\n"
+        "3. В \"confidence\" укажи \"high\", если значение указано явно и однозначно, и \"low\", если ты "
+        "вывел его косвенно/предположительно. Для пустого value confidence всегда \"low\".\n"
+        "4. В \"source_snippet\" приведи короткую цитату из текста (не длиннее 12-15 слов), на основании "
+        "которой определено значение. Для пустого value — пустая строка.\n\n"
+        "Формат ответа — JSON-объект, ключи — это ровно переданные ключи полей:\n"
+        "{\n"
+        '  "ключ_поля": {"value": "...", "confidence": "high"|"low", "source_snippet": "..."},\n'
+        "  ...\n"
+        "}"
+    )
+
+
+def _build_facts_system_prompt() -> str:
+    """Промпт первого прохода — только сбор фактов, никакой юридической
+    формулировки. Специально отделён от второго прохода (см.
+    _build_synthesis_system_prompt): так весь список фактов виден целиком и
+    его можно сверить с текстом фабулы, прежде чем он пойдёт в юридический
+    текст — это и есть механизм контроля от додумывания фактов."""
+    return (
+        "Ты — ассистент юриста. Тебе дан текст фабулы дела клиента юридической компании.\n"
+        "Составь список фактов/событий, упомянутых в тексте, в хронологическом порядке "
+        "(насколько это возможно по имеющимся датам).\n\n"
+        "Правила:\n"
+        "1. Каждый факт — одно событие: обращение, происшествие, решение, документ, разговор и т.п.\n"
+        "2. Если у события есть дата в тексте — укажи её в поле \"date\" в формате ДД.ММ.ГГГГ. Если "
+        "дата не указана явно — оставь \"date\": null, но всё равно включи событие в список.\n"
+        "3. В поле \"event\" опиши событие кратко, но со всеми значимыми деталями ИЗ ТЕКСТА (кто, что, "
+        "где, с каким результатом). НИЧЕГО не добавляй от себя.\n"
+        "4. Не пропускай события, даже если они кажутся малозначительными.\n\n"
+        "Ответ — строго JSON-объект вида:\n"
+        '{"facts": [{"date": "ДД.ММ.ГГГГ"|null, "event": "..."}, ...]}\n'
+        "Без пояснений, без markdown, без обёртки в ```."
+    )
+
+
+def _build_synthesis_system_prompt(facts: List[dict], fields: List[dict]) -> str:
+    """Промпт второго прохода — на входе только список фактов (не сырой текст
+    фабулы повторно) и рецепты нужных полей. Модель работает исключительно
+    со списком фактов: если факта нет в списке, взять его в тексте неоткуда —
+    так составные поля защищены от придумывания того, чего не было в
+    исходной фабуле."""
+    facts_lines = "\n".join(
+        f"{i + 1}. [{f['date'] or 'дата не указана'}] {f['event']}" for i, f in enumerate(facts)
+    ) or "(фактов не найдено)"
+    fields_lines = "\n".join(
+        f"- {f['group_key']} — {f['label']}: {f['instructions']}" for f in fields
+    )
+    return (
+        "Ты — ассистент юриста. Тебе дан список фактов по делу (см. ниже) и список полей документа, "
+        "которые нужно заполнить связным юридическим текстом.\n\n"
+        "Список фактов (используй ТОЛЬКО эти факты, ничего от себя не добавляй):\n"
+        f"{facts_lines}\n\n"
+        "Поля для заполнения (ключ — название — инструкция, что и как писать):\n"
+        f"{fields_lines}\n\n"
+        "Правила:\n"
+        "1. Пиши связным текстом в стиле официального юридического документа, без нумерации и "
+        "маркированных списков, если в инструкции к полю не сказано иное.\n"
+        "2. Используй ТОЛЬКО перечисленные факты. Если фактов для поля недостаточно — напиши то, что "
+        "есть, не выдумывай недостающее и не пиши общих фраз вместо фактов.\n"
+        "3. Не пиши фразы вроде \"согласно предоставленным фактам\" — пиши так, как должно быть в самом "
+        "документе.\n\n"
+        "Формат ответа — строго JSON-объект, ключи — это ровно переданные ключи полей:\n"
+        '{"ключ_поля": "текст абзаца", ...}\n'
+        "Без пояснений, без markdown, без обёртки в ```."
+    )
+
+
+def _call_openrouter_json(system_prompt: str, user_text: str, model: str) -> Tuple[dict, dict]:
+    """Дёргает OpenRouter, возвращает (разобранный JSON-ответ, usage-словарь).
+    Бросает HTTPException с понятным текстом при любой проблеме — ключ не
+    задан, сеть недоступна, модель ответила не-JSON-ом и т.п. Намеренно не
+    глотает ошибки молча: юрист должен видеть, что разбор не удался, а не
+    получить пустую форму без объяснений."""
+    if not OPENROUTER_API_KEY:
+        raise HTTPException(status_code=500, detail="ИИ не настроен: не задан OPENROUTER_API_KEY на сервере")
+
+    try:
+        resp = httpx.post(
+            OPENROUTER_URL,
+            headers={
+                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_text},
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0,
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=502, detail=f"ИИ-сервис вернул ошибку: {e.response.status_code}")
+    except httpx.HTTPError as e:
+        raise HTTPException(status_code=502, detail=f"ИИ-сервис недоступен: {e}")
+
+    data = resp.json()
+    try:
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError):
+        raise HTTPException(status_code=502, detail="Некорректный ответ ИИ-сервиса (нет текста ответа)")
+
+    # На случай, если модель всё же обернула JSON в ```json ... ``` несмотря
+    # на прямой запрет в промпте — снимаем обёртку перед разбором.
+    cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", content.strip())
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="Не удалось разобрать ответ ИИ как JSON")
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=502, detail="Ответ ИИ имеет неожиданный формат (ожидался JSON-объект)")
+
+    return parsed, (data.get("usage") or {})
+
+
+def _log_ai_request(
+    db: Session,
+    case_id: uuid.UUID,
+    request_type: str,
+    model_used: Optional[str],
+    usage: dict,
+    summary: Optional[dict],
+    success: bool,
+    error_message: Optional[str],
+    user_id: Optional[uuid.UUID],
+):
+    """Пишет запись в лог ИИ-запросов. Best-effort: ошибка логирования не
+    должна ронять основной ответ пользователю, поэтому обёрнута отдельно от
+    основной транзакции (см. вызовы ниже)."""
+    try:
+        db.add(models.AIRequestLog(
+            id=uuid.uuid4(),
+            case_id=case_id,
+            request_type=request_type,
+            model_used=model_used,
+            prompt_tokens=usage.get("prompt_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+            success=success,
+            error_message=error_message,
+            raw_response=json.dumps(summary, ensure_ascii=False) if summary is not None else None,
+            created_by=user_id,
+        ))
+        db.commit()
+    except Exception as e:  # noqa: BLE001 — логирование не должно ломать основной запрос
+        db.rollback()
+        print(f"[ai-log] не удалось записать лог ИИ-запроса: {e}", file=sys.stderr)
+
+
+@app.post("/api/cases/{case_id}/ai/extract-fields", response_model=ExtractFieldsResponse)
+def extract_fields_from_narrative(
+    case_id: uuid.UUID,
+    data: ExtractFieldsRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Разбор сырого текста фабулы через ИИ — заполняет ТОЛЬКО простые поля
+    (см. AI_SIMPLE_FIELD_TYPES) по шаблонам, отмеченным для этого дела.
+    Составные поля (хронология, обстоятельства и т.п.) — отдельный, более
+    сложный сценарий следующего этапа, здесь не трогаются.
+
+    Поля, которые юрист уже подтвердил вручную (is_confirmed_by_user=True),
+    НЕ перезаписываются — повторный разбор не затирает то, что человек уже
+    проверил и оставил."""
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    narrative = data.raw_narrative if data.raw_narrative is not None else case.raw_narrative
+    if not narrative or not narrative.strip():
+        raise HTTPException(status_code=400, detail="Нет текста фабулы для разбора")
+
+    if data.raw_narrative is not None:
+        case.raw_narrative = data.raw_narrative
+        db.commit()
+
+    if not data.template_ids:
+        raise HTTPException(status_code=400, detail="Не выбраны документы дела — непонятно, какие поля искать")
+
+    templates = db.query(models.Template).filter(models.Template.id.in_(data.template_ids)).all()
+    resolved_templates = _resolve_case_templates(db, case, templates)
+    fields = _collect_simple_ai_fields(db, resolved_templates)
+    if not fields:
+        raise HTTPException(status_code=400, detail="В выбранных документах нет простых полей для заполнения")
+
+    system_prompt = _build_extract_system_prompt(fields)
+    ai_model = _get_ai_model(db)
+
+    try:
+        parsed, usage = _call_openrouter_json(system_prompt, narrative, ai_model)
+    except HTTPException as e:
+        _log_ai_request(
+            db, case_id, "extract_fields", ai_model, {}, None,
+            success=False, error_message=e.detail, user_id=current_user.id,
+        )
+        raise
+
+    results: List[ExtractedFieldResult] = []
+    log_summary: Dict[str, dict] = {}
+
+    for f in fields:
+        group_key = f["group_key"]
+        entry = parsed.get(group_key) or parsed.get(f["field_key"]) or {}
+        value = str(entry.get("value") or "").strip()
+        confidence = entry.get("confidence") or "low"
+        snippet = entry.get("source_snippet") or None
+
+        applied = False
+        skipped_reason = None
+
+        if not value:
+            skipped_reason = "empty"
+        else:
+            existing = (
+                db.query(models.CaseFieldValue)
+                .filter(
+                    models.CaseFieldValue.case_id == case_id,
+                    models.CaseFieldValue.field_key == group_key,
+                )
+                .first()
+            )
+            if existing and existing.is_confirmed_by_user:
+                skipped_reason = "confirmed_by_user"
+            elif existing:
+                existing.value = value
+                existing.is_ai_generated = True
+                existing.is_confirmed_by_user = False
+                existing.ai_source_snippet = snippet
+                applied = True
+            else:
+                db.add(models.CaseFieldValue(
+                    id=uuid.uuid4(),
+                    case_id=case_id,
+                    field_key=group_key,
+                    value=value,
+                    is_ai_generated=True,
+                    is_confirmed_by_user=False,
+                    ai_source_snippet=snippet,
+                ))
+                applied = True
+
+        results.append(ExtractedFieldResult(
+            field_key=group_key,
+            label=f["label"],
+            value=value,
+            confidence=confidence,
+            source_snippet=snippet,
+            applied=applied,
+            skipped_reason=skipped_reason,
+        ))
+        log_summary[group_key] = {"value": value, "confidence": confidence, "applied": applied, "skipped_reason": skipped_reason}
+
+    db.commit()
+
+    _log_ai_request(
+        db, case_id, "extract_fields", ai_model, usage, log_summary,
+        success=True, error_message=None, user_id=current_user.id,
+    )
+
+    return ExtractFieldsResponse(results=results, model_used=ai_model)
+
+
+@app.get("/api/admin/ai-settings", response_model=AiSettingsOut)
+def get_ai_settings(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Список моделей-кандидатов с ценами и расчётной стоимостью одного
+    обращения к разбору фабулы + какая модель выбрана сейчас. Только админ —
+    выбор модели влияет на расходы всей конторы, юрист не должен иметь
+    возможность незаметно переключить всех на дорогую модель."""
+    current = _get_ai_model(db)
+    models_out = [
+        AiModelInfo(
+            slug=m["slug"],
+            provider=m["provider"],
+            label=m["label"],
+            price_in_per_million=m["price_in"],
+            price_out_per_million=m["price_out"],
+            estimated_cost_per_call=round(_estimate_call_cost(m["price_in"], m["price_out"]), 4),
+            note=m.get("note"),
+            is_current=(m["slug"] == current),
+        )
+        for m in AI_MODEL_CATALOG
+    ]
+    return AiSettingsOut(current_model=current, models=models_out)
+
+
+@app.patch("/api/admin/ai-settings", response_model=AiSettingsOut)
+def update_ai_settings(
+    data: AiSettingsUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    model_slug = (data.model or "").strip()
+    if not model_slug:
+        raise HTTPException(status_code=400, detail="Не указана модель")
+
+    setting = db.query(models.AppSetting).filter(models.AppSetting.key == AI_MODEL_SETTING_KEY).first()
+    if setting:
+        setting.value = model_slug
+    else:
+        db.add(models.AppSetting(key=AI_MODEL_SETTING_KEY, value=model_slug))
+    db.commit()
+
+    return get_ai_settings(db=db, current_user=current_user)
+
+
+@app.get("/api/admin/ai-requests-log", response_model=List[AiRequestLogOut])
+def list_ai_requests_log(
+    case_id: Optional[uuid.UUID] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Лог обращений к ИИ — для контроля качества разбора и расходов на
+    токены. Только админ (см. AIRequestLog в models.py — там же объяснено,
+    почему лог намеренно не хранит полный текст фабулы/сканов)."""
+    query = (
+        db.query(models.AIRequestLog, models.Case.client_name, models.User.full_name)
+        .join(models.Case, models.Case.id == models.AIRequestLog.case_id)
+        .outerjoin(models.User, models.User.id == models.AIRequestLog.created_by)
+        .order_by(models.AIRequestLog.created_at.desc())
+    )
+    if case_id:
+        query = query.filter(models.AIRequestLog.case_id == case_id)
+    rows = query.limit(min(limit, 500)).all()
+
+    return [
+        AiRequestLogOut(
+            id=log.id,
+            case_id=log.case_id,
+            case_client_name=client_name,
+            request_type=log.request_type,
+            model_used=log.model_used,
+            prompt_tokens=log.prompt_tokens,
+            completion_tokens=log.completion_tokens,
+            success=log.success,
+            error_message=log.error_message,
+            created_at=log.created_at,
+            created_by_name=user_name,
+        )
+        for log, client_name, user_name in rows
+    ]
+
+
+# ---------- Рецепты составных полей (админ, этап 3) ----------
+
+@app.get("/api/admin/ai-field-recipes", response_model=List[AIFieldRecipeOut])
+def list_ai_field_recipes(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Список всех составных (textarea) полей, встречающихся хоть в одном
+    шаблоне системы, вместе с их рецептом (если он уже настроен) или
+    пометкой, что будет использован общий запасной вариант. Список НЕ
+    привязан к конкретной категории/направлению специально — по мере
+    добавления гражданского направления новые составные поля появятся здесь
+    сами собой, без изменения кода."""
+    fields = db.query(models.TemplateField).filter(models.TemplateField.field_type == "textarea").all()
+    by_group: Dict[str, str] = {}
+    for f in fields:
+        group_key = f.shared_group_key if (f.is_shared and f.shared_group_key) else f.field_key
+        by_group.setdefault(group_key, f.label)
+
+    recipes = {
+        r.group_key: r
+        for r in db.query(models.AIFieldRecipe).filter(models.AIFieldRecipe.group_key.in_(by_group.keys())).all()
+    }
+
+    return [
+        AIFieldRecipeOut(
+            group_key=gk,
+            label=label,
+            instructions=(recipes[gk].instructions if gk in recipes else None),
+            has_recipe=(gk in recipes),
+        )
+        for gk, label in by_group.items()
+    ]
+
+
+@app.patch("/api/admin/ai-field-recipes/{group_key}", response_model=AIFieldRecipeOut)
+def update_ai_field_recipe(
+    group_key: str,
+    data: AIFieldRecipeUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    instructions = (data.instructions or "").strip()
+    if not instructions:
+        raise HTTPException(status_code=400, detail="Инструкция не может быть пустой")
+
+    field = (
+        db.query(models.TemplateField)
+        .filter(or_(models.TemplateField.field_key == group_key, models.TemplateField.shared_group_key == group_key))
+        .first()
+    )
+    label = field.label if field else group_key
+
+    recipe = db.query(models.AIFieldRecipe).filter(models.AIFieldRecipe.group_key == group_key).first()
+    if recipe:
+        recipe.instructions = instructions
+        recipe.label = label
+    else:
+        db.add(models.AIFieldRecipe(group_key=group_key, label=label, instructions=instructions))
+    db.commit()
+
+    return AIFieldRecipeOut(group_key=group_key, label=label, instructions=instructions, has_recipe=True)
+
+
+# ---------- ИИ-черновик составных полей (этап 3) ----------
+
+@app.post("/api/cases/{case_id}/ai/draft-fields", response_model=DraftFieldsResponse)
+def draft_composite_fields_from_narrative(
+    case_id: uuid.UUID,
+    data: DraftFieldsRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Двухшаговый разбор составных (textarea) полей — хронология обращений,
+    обстоятельства получения травмы и т.п.
+
+    Шаг 1 (сбор фактов): ИИ читает фабулу и составляет список конкретных
+    событий с датами — без какой-либо юридической формулировки.
+    Шаг 2 (сборка текста): второй запрос к ИИ получает ТОЛЬКО список фактов
+    из шага 1 (не сырую фабулу повторно) и рецепт каждого поля — и пишет
+    связный текст, используя исключительно эти факты. Список фактов из шага
+    1 возвращается вместе с ответом — юрист может свериться с фабулой, что
+    ничего не упущено и не придумано (см. DraftFieldsResponse.facts).
+
+    Поля, которые юрист уже подтвердил вручную, не перезаписываются — как и
+    в /ai/extract-fields."""
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    narrative = data.raw_narrative if data.raw_narrative is not None else case.raw_narrative
+    if not narrative or not narrative.strip():
+        raise HTTPException(status_code=400, detail="Нет текста фабулы для разбора")
+
+    if data.raw_narrative is not None:
+        case.raw_narrative = data.raw_narrative
+        db.commit()
+
+    if not data.template_ids:
+        raise HTTPException(status_code=400, detail="Не выбраны документы дела — непонятно, какие поля собирать")
+
+    templates = db.query(models.Template).filter(models.Template.id.in_(data.template_ids)).all()
+    resolved_templates = _resolve_case_templates(db, case, templates)
+    fields = _collect_textarea_ai_fields(db, resolved_templates)
+    if not fields:
+        raise HTTPException(status_code=400, detail="В выбранных документах нет составных полей (хронология/обстоятельства и т.п.)")
+
+    ai_model = _get_ai_model(db)
+
+    # ---- Шаг 1: сбор фактов ----
+    facts_prompt = _build_facts_system_prompt()
+    try:
+        facts_parsed, usage1 = _call_openrouter_json(facts_prompt, narrative, ai_model)
+    except HTTPException as e:
+        _log_ai_request(db, case_id, "draft_facts", ai_model, {}, None, success=False, error_message=e.detail, user_id=current_user.id)
+        raise
+
+    raw_facts = facts_parsed.get("facts")
+    facts_clean: List[dict] = []
+    if isinstance(raw_facts, list):
+        for item in raw_facts:
+            if isinstance(item, dict) and str(item.get("event") or "").strip():
+                facts_clean.append({"date": item.get("date") or None, "event": str(item["event"]).strip()})
+
+    if not facts_clean:
+        _log_ai_request(db, case_id, "draft_facts", ai_model, usage1, {"facts_count": 0},
+                         success=True, error_message=None, user_id=current_user.id)
+        raise HTTPException(status_code=400, detail="Не удалось выделить факты из текста фабулы — уточните текст и попробуйте снова")
+
+    _log_ai_request(db, case_id, "draft_facts", ai_model, usage1, {"facts_count": len(facts_clean)},
+                     success=True, error_message=None, user_id=current_user.id)
+
+    # ---- Шаг 2: сборка текста по рецептам ----
+    recipes = {
+        r.group_key: r.instructions
+        for r in db.query(models.AIFieldRecipe).filter(models.AIFieldRecipe.group_key.in_([f["group_key"] for f in fields])).all()
+    }
+    fields_with_recipes = [
+        {**f, "instructions": recipes.get(f["group_key"], DEFAULT_FIELD_RECIPE_INSTRUCTIONS),
+         "used_generic": f["group_key"] not in recipes}
+        for f in fields
+    ]
+
+    synthesis_prompt = _build_synthesis_system_prompt(facts_clean, fields_with_recipes)
+    try:
+        synth_parsed, usage2 = _call_openrouter_json(synthesis_prompt, "Составь тексты полей по инструкции выше.", ai_model)
+    except HTTPException as e:
+        _log_ai_request(db, case_id, "draft_narrative", ai_model, {}, None, success=False, error_message=e.detail, user_id=current_user.id)
+        raise
+
+    results: List[DraftedFieldResult] = []
+    log_summary: Dict[str, dict] = {}
+
+    for f in fields_with_recipes:
+        group_key = f["group_key"]
+        draft_text = str(synth_parsed.get(group_key) or "").strip()
+        applied = False
+        skipped_reason = None
+
+        if not draft_text:
+            skipped_reason = "empty"
+        else:
+            existing = (
+                db.query(models.CaseFieldValue)
+                .filter(models.CaseFieldValue.case_id == case_id, models.CaseFieldValue.field_key == group_key)
+                .first()
+            )
+            if existing and existing.is_confirmed_by_user:
+                skipped_reason = "confirmed_by_user"
+            elif existing:
+                existing.value = draft_text
+                existing.is_ai_generated = True
+                existing.is_confirmed_by_user = False
+                existing.ai_source_snippet = None  # для составных полей источник — весь список фактов, а не одна цитата
+                applied = True
+            else:
+                db.add(models.CaseFieldValue(
+                    id=uuid.uuid4(),
+                    case_id=case_id,
+                    field_key=group_key,
+                    value=draft_text,
+                    is_ai_generated=True,
+                    is_confirmed_by_user=False,
+                ))
+                applied = True
+
+        results.append(DraftedFieldResult(
+            field_key=group_key,
+            label=f["label"],
+            draft=draft_text,
+            applied=applied,
+            skipped_reason=skipped_reason,
+            used_generic_recipe=f["used_generic"],
+        ))
+        log_summary[group_key] = {"applied": applied, "skipped_reason": skipped_reason, "used_generic_recipe": f["used_generic"]}
+
+    db.commit()
+
+    _log_ai_request(db, case_id, "draft_narrative", ai_model, usage2, log_summary,
+                     success=True, error_message=None, user_id=current_user.id)
+
+    return DraftFieldsResponse(
+        results=results,
+        facts=[FactItemOut(date=f["date"], event=f["event"]) for f in facts_clean],
+        model_used=ai_model,
+    )
 
 
 def _convert_to_pdf(docx_path: str, out_dir: str) -> Optional[str]:

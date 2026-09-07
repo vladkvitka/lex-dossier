@@ -1347,7 +1347,21 @@ def _call_openrouter_json(system_prompt: str, user_text: str, model: str) -> Tup
         )
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code=502, detail=f"ИИ-сервис вернул ошибку: {e.response.status_code}")
+        # Достаём человекочитаемое сообщение из тела ответа OpenRouter (у них
+        # обычно приходит {"error": {"message": "..."}}) — код статуса сам по
+        # себе (403/429/402 и т.п.) не объясняет причину, а именно это
+        # сообщение обычно и содержит настоящую причину (не хватает кредитов,
+        # заблокировано модерацией, ограничение по региону и т.п.).
+        try:
+            error_body = e.response.json()
+            provider_message = error_body.get("error", {}).get("message") or e.response.text
+        except Exception:
+            provider_message = e.response.text
+        provider_message = (provider_message or "")[:300]  # на случай очень длинного тела
+        raise HTTPException(
+            status_code=502,
+            detail=f"ИИ-сервис вернул ошибку {e.response.status_code}: {provider_message}",
+        )
     except httpx.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"ИИ-сервис недоступен: {e}")
 

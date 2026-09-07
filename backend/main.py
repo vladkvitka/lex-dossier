@@ -1256,8 +1256,10 @@ def _build_extract_system_prompt(fields: List[dict]) -> str:
         "Список полей (ключ — название — тип):\n"
         f"{field_lines}\n\n"
         "Правила:\n"
-        "1. Если значение поля явно есть в тексте — впиши его в \"value\" в чистом виде, без лишних слов "
-        "(для дат — в формате ДД.ММ.ГГГГ, если в тексте не указано иначе).\n"
+        "1. Если значение поля явно есть в тексте — впиши его в \"value\" в чистом виде, без лишних слов. "
+        "Для полей с типом (date) верни дату СТРОГО в формате ГГГГ-ММ-ДД (например 1990-01-05) — это формат "
+        "хранения дат в системе, а не для показа в документе. Для остальных типов пиши как принято в "
+        "естественном русском тексте.\n"
         "2. Если значения в тексте нет — верни \"value\": \"\" (пустая строка). НИКОГДА не придумывай и не "
         "додумывай данные, которых нет в тексте.\n"
         "3. В \"confidence\" укажи \"high\", если значение указано явно и однозначно, и \"low\", если ты "
@@ -1397,6 +1399,33 @@ def _call_openrouter_json(system_prompt: str, user_text: str, model: str) -> Tup
     return parsed, (data.get("usage") or {})
 
 
+def _normalize_ai_date_value(raw: str) -> str:
+    """Приводит дату, вернувшуюся от ИИ, к единому ISO-формату ГГГГ-ММ-ДД —
+    именно в нём система хранит даты в case_field_values (см.
+    _display_value_for_field — там же обратное преобразование для показа в
+    самом документе). Модели не всегда дословно следуют формату из
+    промпта, поэтому подстраховываемся разбором нескольких
+    распространённых вариантов написания даты, а не полагаемся только на
+    инструкцию в промпте."""
+    raw = (raw or "").strip()
+    if not raw or re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
+        return raw  # пусто или уже ISO — ничего делать не нужно
+
+    m = re.match(r"^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{2,4})$", raw)
+    if not m:
+        return raw  # не удалось разобрать — лучше видимая проблема (останется как есть), чем тихая потеря данных
+
+    d, mo, y = m.groups()
+    if len(y) == 2:
+        y = ("20" if int(y) < 50 else "19") + y
+    try:
+        d_i, mo_i = int(d), int(mo)
+        if 1 <= d_i <= 31 and 1 <= mo_i <= 12:
+            return f"{y}-{mo_i:02d}-{d_i:02d}"
+    except ValueError:
+        pass
+    return raw
+
 def _log_ai_request(
     db: Session,
     case_id: uuid.UUID,
@@ -1485,6 +1514,8 @@ def extract_fields_from_narrative(
         group_key = f["group_key"]
         entry = parsed.get(group_key) or parsed.get(f["field_key"]) or {}
         value = str(entry.get("value") or "").strip()
+        if f["field_type"] == "date" and value:
+            value = _normalize_ai_date_value(value)
         confidence = entry.get("confidence") or "low"
         snippet = entry.get("source_snippet") or None
 

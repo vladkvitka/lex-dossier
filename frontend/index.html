@@ -64,6 +64,9 @@
         <button class="nav-item active" data-nav="admin-categories" onclick="switchNav('admin-categories', this)">Категории</button>
         <button class="nav-item" data-nav="admin-templates" onclick="switchNav('admin-templates', this)">Шаблоны</button>
         <button class="nav-item" data-nav="admin-packages" onclick="switchNav('admin-packages', this)">Пакеты</button>
+        <button class="nav-item" data-nav="admin-ai-settings" onclick="switchNav('admin-ai-settings', this); loadAiSettings();">Настройки ИИ</button>
+        <button class="nav-item" data-nav="admin-ai-recipes" onclick="switchNav('admin-ai-recipes', this); loadAiFieldRecipes();">Рецепты ИИ</button>
+        <button class="nav-item" data-nav="admin-ai-log" onclick="switchNav('admin-ai-log', this); loadAiRequestsLog();">Лог ИИ-запросов</button>
       </div>
     </div>
 
@@ -160,6 +163,29 @@
               <div>
                 <div class="doc-group-label">Служебные</div>
                 <div id="caseTemplatesBoxService" class="upload-zone"></div>
+              </div>
+            </div>
+
+            <div id="caseNarrativeBox" style="margin-top:22px;">
+              <h2 style="font-size:15px;margin:0 0 10px;">Фабула дела</h2>
+              <div class="upload-zone" style="max-width:none;">
+                <div class="field" style="margin-bottom:10px;">
+                  <textarea id="caseNarrativeText" rows="6" placeholder="Вставьте сюда сырой текст фабулы от клиента — ИИ попробует найти в нём значения для простых полей формы (ФИО, даты, адреса и т.п.)"
+                    oninput="scheduleSaveNarrative()"></textarea>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+                  <button class="btn-primary btn-sm" id="aiExtractBtn" onclick="runAiExtractFields()">✨ Разобрать простые поля</button>
+                  <button class="btn btn-sm" id="aiDraftBtn" onclick="runAiDraftFields()">📝 Собрать хронологию/обстоятельства</button>
+                  <span id="aiExtractHint" style="color:var(--muted);font-size:12px;"></span>
+                </div>
+                <div class="login-error" id="aiExtractError" style="margin-top:10px;"></div>
+                <div id="aiFactsPanel" style="display:none;margin-top:14px;padding:12px 14px;background:var(--surface-alt);border:1px solid var(--border);border-radius:var(--radius-s);">
+                  <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" onclick="toggleAiFactsPanel()">
+                    <strong style="font-size:12.5px;">Факты, найденные ИИ в тексте (<span id="aiFactsCount">0</span>) — сверьте с фабулой</strong>
+                    <span id="aiFactsToggleIcon">▾</span>
+                  </div>
+                  <ul id="aiFactsListBox" style="margin:10px 0 0;padding-left:18px;font-size:12.5px;color:var(--ink-soft);display:none;"></ul>
+                </div>
               </div>
             </div>
 
@@ -384,12 +410,70 @@
         </div>
       </div>
 
+      <!-- ===== АДМИН: НАСТРОЙКИ ИИ ===== -->
+      <div class="screen" id="screen-admin-ai-settings">
+        <h1 class="page-title">Настройки ИИ</h1>
+        <p class="page-sub">Модель, которая используется для ИИ-разбора фабулы дела (кнопка «Разобрать через ИИ» в карточке дела). Цены — ориентировочные, актуальны на момент добавления модели в список; для точных расходов сверяйтесь с openrouter.ai/models.</p>
+
+        <div class="notice" id="aiSettingsCurrentNotice">Загрузка…</div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th></th>
+                <th>Модель</th>
+                <th>Провайдер</th>
+                <th>Цена вход / выход ($ за 1 млн токенов)</th>
+                <th>≈ Стоимость 1 разбора фабулы</th>
+                <th>Заметка</th>
+              </tr>
+            </thead>
+            <tbody id="aiSettingsBody"></tbody>
+          </table>
+        </div>
+        <div class="login-error" id="aiSettingsError" style="margin-top:12px;"></div>
+      </div>
+
+      <!-- ===== АДМИН: РЕЦЕПТЫ ИИ (составные поля) ===== -->
+      <div class="screen" id="screen-admin-ai-recipes">
+        <h1 class="page-title">Рецепты ИИ для составных полей</h1>
+        <p class="page-sub">Инструкция для ИИ, что и как писать в конкретное составное поле (хронология обращений, обстоятельства получения травмы и т.п.). Пока рецепт не задан — используется общая запасная инструкция, функция всё равно работает, просто менее прицельно.</p>
+
+        <div id="aiRecipesList"></div>
+        <div class="login-error" id="aiRecipesError" style="margin-top:12px;"></div>
+      </div>
+
+      <!-- ===== АДМИН: ЛОГ ИИ-ЗАПРОСОВ ===== -->
+      <div class="screen" id="screen-admin-ai-log">
+        <h1 class="page-title">Лог ИИ-запросов</h1>
+        <p class="page-sub">Для контроля качества разбора и расходов на токены. Полный текст фабулы и сканов в лог намеренно не попадает — только технические метрики и сводка результата.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Дело</th>
+                <th>Тип запроса</th>
+                <th>Модель</th>
+                <th>Токены (вход/выход)</th>
+                <th>Статус</th>
+                <th>Юрист</th>
+              </tr>
+            </thead>
+            <tbody id="aiLogBody"></tbody>
+          </table>
+        </div>
+        <div class="login-error" id="aiLogError" style="margin-top:12px;"></div>
+      </div>
+
     </div>
   </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=19"></script>
+<script src="app.js?v=21"></script>
 </body>
 </html>

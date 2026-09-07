@@ -1068,6 +1068,14 @@ async function deletePackageConfirm(packageId){
 // ---------- дела ----------
 
 let currentCase = null;           // текущее открытое дело (CaseDetailOut)
+let narrativeSaveTimer = null;    // debounce автосохранения текста фабулы
+// Метаданные последнего ИИ-разбора по ключу поля: {value, confidence,
+// source_snippet, applied, skipped_reason} — НЕ сохраняются на сервере,
+// живут только пока открыта карточка дела (используются для подсказки при
+// наведении на бейдж "ИИ"). После перезагрузки страницы пропадают — бейдж
+// при этом остаётся (он строится из is_ai_generated, который persist-ится),
+// просто подсказка-цитата будет не видна до следующего разбора.
+let aiExtractionMeta = {};
 let currentCaseSelectedTemplates = new Set(); // выбранные для дела шаблоны (id)
 let templateGroupKeysByTemplateId = {}; // template_id -> [groupKey, ...] — для красных/зелёных индикаторов во вкладках
 
@@ -1283,12 +1291,17 @@ async function openCase(caseId){
       categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status) +
       (currentCase.created_by_email ? ' · автор: ' + currentCase.created_by_email : '');
 
+    document.getElementById('caseNarrativeText').value = currentCase.raw_narrative || '';
+    document.getElementById('aiExtractError').style.display = 'none';
+    aiExtractionMeta = {};
+
     const available = currentAvailableTemplates();
 
     renderCaseTemplatesBox(available);
     await renderCaseFieldsForm(available);
     renderCaseDocuments();
     renderCaseDocTabs(available);
+    updateAiExtractHint();
     caseHasPendingChanges = false;
     updateGenerateButtonState();
 
@@ -1367,6 +1380,7 @@ async function onCaseTemplateToggle(){
   const available = currentAvailableTemplates();
   await renderCaseFieldsForm(available);
   renderCaseDocTabs(available);
+  updateAiExtractHint();
   markCaseHasPendingChanges();
 }
 
@@ -1400,17 +1414,39 @@ async function renderCaseFieldsForm(available){
   }
 
   const existingValues = {};
-  (currentCase.fields || []).forEach(f => { existingValues[f.field_key] = f.value; });
+  const aiFlags = {}; // groupKey -> {is_ai_generated, is_confirmed_by_user}
+  (currentCase.fields || []).forEach(f => {
+    existingValues[f.field_key] = f.value;
+    aiFlags[f.field_key] = {
+      is_ai_generated: !!f.is_ai_generated,
+      is_confirmed_by_user: !!f.is_confirmed_by_user,
+      ai_source_snippet: f.ai_source_snippet || null,
+    };
+  });
 
   const rows = Array.from(fieldsByGroupKey.entries());
   fieldsBox.innerHTML = rows.length
     ? rows.map(([groupKey, f]) => `
         <div class="field">
-          <label>${escapeHtml(f.label)}${f.is_required ? ' *' : ''}${f.is_shared ? ' <span style="color:var(--muted);font-weight:400;">(общее)</span>' : ''}</label>
+          <label>${escapeHtml(f.label)}${f.is_required ? ' *' : ''}${f.is_shared ? ' <span style="color:var(--muted);font-weight:400;">(общее)</span>' : ''}${aiBadgeHtml(groupKey, aiFlags)}</label>
           ${caseFieldInputHtml(f, groupKey, existingValues[groupKey] || '')}
         </div>`).join('')
     : '<div style="color:var(--muted);">В выбранных документах не найдено полей</div>';
   updateDocTabCompletionDots();
+}
+
+function aiBadgeHtml(groupKey, aiFlags){
+  const flag = aiFlags[groupKey];
+  if (!flag || !flag.is_ai_generated || flag.is_confirmed_by_user) return '';
+  // Сохранённая в базе цитата (переживает перезагрузку) в приоритете перед
+  // временной, полученной в рамках текущего сеанса разбора.
+  const persistedSnippet = flag.ai_source_snippet;
+  const sessionSnippet = aiExtractionMeta[groupKey] && aiExtractionMeta[groupKey].source_snippet;
+  const snippet = persistedSnippet || sessionSnippet;
+  const title = snippet
+    ? `Предложено ИИ по фразе: «${snippet}». Проверьте и при необходимости поправьте — после правки пометка исчезнет.`
+    : 'Предложено ИИ (составное поле — собрано из нескольких фактов фабулы, см. панель "Факты, найденные ИИ" выше). Проверьте и при необходимости поправьте.';
+  return ` <span class="ai-badge" title="${escapeHtml(title)}">ИИ</span>`;
 }
 
 function caseFieldInputHtml(f, groupKey, value){
@@ -1456,6 +1492,324 @@ async function saveCaseFields(opts = {}){
       errBox.textContent = 'Ошибка сохранения: ' + err.message;
       errBox.style.display = 'block';
     }
+  }
+}
+
+// ---------- админ: настройки ИИ-модели ----------
+
+async function loadAiSettings(){
+  const body = document.getElementById('aiSettingsBody');
+  const notice = document.getElementById('aiSettingsCurrentNotice');
+  const errBox = document.getElementById('aiSettingsError');
+  errBox.style.display = 'none';
+  notice.textContent = 'Загрузка…';
+  try {
+    const data = await api('/admin/ai-settings');
+    renderAiSettings(data);
+  } catch (err){
+    notice.textContent = '';
+    errBox.textContent = 'Не удалось загрузить настройки ИИ: ' + err.message;
+    errBox.style.display = 'block';
+    body.innerHTML = '';
+  }
+}
+
+function renderAiSettings(data){
+  const notice = document.getElementById('aiSettingsCurrentNotice');
+  const body = document.getElementById('aiSettingsBody');
+  const current = data.models.find(m => m.is_current);
+  notice.textContent = current
+    ? `Сейчас используется: ${current.label} (${current.provider}) — расчётно ≈ $${current.estimated_cost_per_call.toFixed(4)} за один разбор фабулы`
+    : `Сейчас используется модель "${data.current_model}" (её нет в списке ниже — выбрана вручную или через .env)`;
+
+  body.innerHTML = data.models.map(m => `
+    <tr>
+      <td><input type="radio" name="aiModelRadio" value="${escapeHtml(m.slug)}" ${m.is_current ? 'checked' : ''} onchange="selectAiModel('${escapeHtml(m.slug)}')"></td>
+      <td>${escapeHtml(m.label)}${m.is_current ? ' <span class="badge badge-ready">текущая</span>' : ''}</td>
+      <td>${escapeHtml(m.provider)}</td>
+      <td>$${m.price_in_per_million.toFixed(2)} / $${m.price_out_per_million.toFixed(2)}</td>
+      <td>≈ $${m.estimated_cost_per_call.toFixed(4)}</td>
+      <td style="color:var(--muted);font-size:12.5px;">${m.note ? escapeHtml(m.note) : ''}</td>
+    </tr>`).join('');
+}
+
+async function selectAiModel(slug){
+  const errBox = document.getElementById('aiSettingsError');
+  errBox.style.display = 'none';
+  try {
+    const data = await api('/admin/ai-settings', {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ model: slug })
+    });
+    renderAiSettings(data);
+    toast('Модель для ИИ-разбора обновлена');
+  } catch (err){
+    errBox.textContent = 'Не удалось переключить модель: ' + err.message;
+    errBox.style.display = 'block';
+    loadAiSettings(); // вернуть чекбокс в актуальное состояние
+  }
+}
+
+// ---------- админ: рецепты ИИ для составных полей ----------
+
+async function loadAiFieldRecipes(){
+  const listBox = document.getElementById('aiRecipesList');
+  const errBox = document.getElementById('aiRecipesError');
+  errBox.style.display = 'none';
+  listBox.innerHTML = 'Загрузка…';
+  try {
+    const recipes = await api('/admin/ai-field-recipes');
+    if (!recipes.length){
+      listBox.innerHTML = '<div style="color:var(--muted);">Пока нет ни одного составного (textarea) поля ни в одном шаблоне.</div>';
+      return;
+    }
+    listBox.innerHTML = recipes.map(r => `
+      <div class="upload-zone" style="max-width:none;margin-bottom:14px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+          <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(r.label)}</strong>
+          <span class="fe-key">${escapeHtml(r.group_key)}</span>
+        </div>
+        ${r.has_recipe ? '' : '<div style="color:var(--amber);font-size:12px;margin-bottom:8px;">Рецепт не настроен — сейчас используется общая запасная инструкция</div>'}
+        <div class="field" style="margin-bottom:8px;">
+          <textarea id="recipeText_${escapeHtml(r.group_key)}" rows="3" placeholder="Что и как писать в это поле — например: перечисли обращения в мед. учреждения в хронологическом порядке с датами и результатами каждого обращения">${escapeHtml(r.instructions || '')}</textarea>
+        </div>
+        <button class="btn-primary btn-sm" onclick="saveAiFieldRecipe('${escapeHtml(r.group_key)}')">Сохранить рецепт</button>
+      </div>`).join('');
+  } catch (err){
+    listBox.innerHTML = '';
+    errBox.textContent = 'Не удалось загрузить рецепты: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function saveAiFieldRecipe(groupKey){
+  const errBox = document.getElementById('aiRecipesError');
+  errBox.style.display = 'none';
+  const text = document.getElementById(`recipeText_${groupKey}`).value.trim();
+  if (!text){
+    errBox.textContent = 'Инструкция не может быть пустой';
+    errBox.style.display = 'block';
+    return;
+  }
+  try {
+    await api(`/admin/ai-field-recipes/${groupKey}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ instructions: text })
+    });
+    toast('Рецепт сохранён');
+    loadAiFieldRecipes();
+  } catch (err){
+    errBox.textContent = 'Не удалось сохранить рецепт: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
+// ---------- админ: лог ИИ-запросов ----------
+
+async function loadAiRequestsLog(){
+  const body = document.getElementById('aiLogBody');
+  const errBox = document.getElementById('aiLogError');
+  errBox.style.display = 'none';
+  body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);">Загрузка…</td></tr>';
+  try {
+    const rows = await api('/admin/ai-requests-log?limit=200');
+    if (!rows.length){
+      body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);">Пока нет ни одного обращения к ИИ</td></tr>';
+      return;
+    }
+    const typeLabels = { extract_fields: 'Простые поля', draft_facts: 'Сбор фактов', draft_narrative: 'Составные поля' };
+    body.innerHTML = rows.map(r => `
+      <tr>
+        <td style="white-space:nowrap;">${new Date(r.created_at).toLocaleString('ru-RU')}</td>
+        <td>${escapeHtml(r.case_client_name || '—')}</td>
+        <td>${escapeHtml(typeLabels[r.request_type] || r.request_type)}</td>
+        <td style="font-size:12px;">${escapeHtml(r.model_used || '—')}</td>
+        <td>${r.prompt_tokens ?? '—'} / ${r.completion_tokens ?? '—'}</td>
+        <td>${r.success ? '<span class="badge badge-ready">успех</span>' : `<span class="badge badge-draft" title="${escapeHtml(r.error_message || '')}">ошибка</span>`}</td>
+        <td>${escapeHtml(r.created_by_name || '—')}</td>
+      </tr>`).join('');
+  } catch (err){
+    body.innerHTML = '';
+    errBox.textContent = 'Не удалось загрузить лог: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
+// ---------- фабула дела + ИИ-разбор простых полей (этап 1) ----------
+
+function scheduleSaveNarrative(){
+  clearTimeout(narrativeSaveTimer);
+  narrativeSaveTimer = setTimeout(saveNarrative, 800);
+}
+
+async function saveNarrative(){
+  if (!currentCase) return;
+  const text = document.getElementById('caseNarrativeText').value;
+  try {
+    await api(`/cases/${currentCase.id}`, {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ raw_narrative: text })
+    });
+    currentCase.raw_narrative = text; // не перерисовываем форму — просто держим состояние в актуальном виде
+  } catch (err){
+    // Тихое автосохранение — как и у полей формы, не дёргаем юриста тостом
+    // на каждую неудачу, следующая попытка ввода сохранит снова.
+  }
+}
+
+function updateAiExtractHint(){
+  const hint = document.getElementById('aiExtractHint');
+  const btn = document.getElementById('aiExtractBtn');
+  const draftBtn = document.getElementById('aiDraftBtn');
+  if (!currentCaseSelectedTemplates.size){
+    hint.textContent = 'Сначала выберите документы слева — по ним ИИ поймёт, какие поля искать';
+    btn.disabled = true;
+    draftBtn.disabled = true;
+  } else {
+    hint.textContent = '';
+    btn.disabled = false;
+    draftBtn.disabled = false;
+  }
+}
+
+async function runAiExtractFields(){
+  if (!currentCase) return;
+  const errBox = document.getElementById('aiExtractError');
+  errBox.style.display = 'none';
+
+  const narrative = document.getElementById('caseNarrativeText').value.trim();
+  if (!narrative){
+    errBox.textContent = 'Вставьте текст фабулы перед разбором';
+    errBox.style.display = 'block';
+    return;
+  }
+  if (!currentCaseSelectedTemplates.size){
+    errBox.textContent = 'Сначала выберите документы дела';
+    errBox.style.display = 'block';
+    return;
+  }
+
+  const btn = document.getElementById('aiExtractBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Разбираю…';
+
+  try {
+    // Разбор одновременно сохраняет текст фабулы на сервере — не нужно
+    // дожидаться отдельного debounce-автосохранения перед запуском.
+    const result = await api(`/cases/${currentCase.id}/ai/extract-fields`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        raw_narrative: narrative,
+        template_ids: Array.from(currentCaseSelectedTemplates),
+      })
+    });
+
+    aiExtractionMeta = {};
+    (result.results || []).forEach(r => { aiExtractionMeta[r.field_key] = r; });
+
+    // Перечитываем дело с сервера — там уже актуальные значения полей и
+    // флаги is_ai_generated/is_confirmed_by_user после разбора.
+    currentCase = await api(`/cases/${currentCase.id}`);
+    const available = currentAvailableTemplates();
+    await renderCaseFieldsForm(available);
+    updateDocTabCompletionDots();
+    refreshPreview();
+    markCaseHasPendingChanges();
+
+    const applied = (result.results || []).filter(r => r.applied).length;
+    const confirmedSkipped = (result.results || []).filter(r => r.skipped_reason === 'confirmed_by_user').length;
+    const notFound = (result.results || []).filter(r => r.skipped_reason === 'empty').length;
+    let msg = `ИИ заполнил полей: ${applied}`;
+    if (notFound) msg += `, не найдено в тексте: ${notFound}`;
+    if (confirmedSkipped) msg += `, пропущено (уже подтверждено вами): ${confirmedSkipped}`;
+    toast(msg);
+  } catch (err){
+    errBox.textContent = 'Ошибка разбора: ' + err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+    updateAiExtractHint();
+  }
+}
+
+function toggleAiFactsPanel(){
+  const list = document.getElementById('aiFactsListBox');
+  const icon = document.getElementById('aiFactsToggleIcon');
+  const isHidden = list.style.display === 'none';
+  list.style.display = isHidden ? 'block' : 'none';
+  icon.textContent = isHidden ? '▴' : '▾';
+}
+
+async function runAiDraftFields(){
+  if (!currentCase) return;
+  const errBox = document.getElementById('aiExtractError');
+  errBox.style.display = 'none';
+
+  const narrative = document.getElementById('caseNarrativeText').value.trim();
+  if (!narrative){
+    errBox.textContent = 'Вставьте текст фабулы перед сбором составных полей';
+    errBox.style.display = 'block';
+    return;
+  }
+  if (!currentCaseSelectedTemplates.size){
+    errBox.textContent = 'Сначала выберите документы дела';
+    errBox.style.display = 'block';
+    return;
+  }
+
+  const btn = document.getElementById('aiDraftBtn');
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Собираю…';
+
+  try {
+    const result = await api(`/cases/${currentCase.id}/ai/draft-fields`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({
+        raw_narrative: narrative,
+        template_ids: Array.from(currentCaseSelectedTemplates),
+      })
+    });
+
+    // Показываем панель с фактами — это и есть проверяемость для составных
+    // полей: юрист может свериться с фабулой, что ничего не упущено и не
+    // придумано, прежде чем доверять собранному тексту.
+    const factsPanel = document.getElementById('aiFactsPanel');
+    const factsList = document.getElementById('aiFactsListBox');
+    document.getElementById('aiFactsCount').textContent = (result.facts || []).length;
+    factsList.innerHTML = (result.facts || []).map(f =>
+      `<li>${f.date ? `<strong>[${escapeHtml(f.date)}]</strong> ` : '<span style="color:var(--muted);">[дата не указана]</span> '}${escapeHtml(f.event)}</li>`
+    ).join('');
+    factsPanel.style.display = 'block';
+
+    currentCase = await api(`/cases/${currentCase.id}`);
+    const available = currentAvailableTemplates();
+    await renderCaseFieldsForm(available);
+    updateDocTabCompletionDots();
+    refreshPreview();
+    markCaseHasPendingChanges();
+
+    const applied = (result.results || []).filter(r => r.applied).length;
+    const confirmedSkipped = (result.results || []).filter(r => r.skipped_reason === 'confirmed_by_user').length;
+    const usedGeneric = (result.results || []).filter(r => r.used_generic_recipe && r.applied).length;
+    let msg = `ИИ собрал полей: ${applied}`;
+    if (confirmedSkipped) msg += `, пропущено (уже подтверждено вами): ${confirmedSkipped}`;
+    if (usedGeneric) msg += `. Для ${usedGeneric} из них ещё не настроен точный рецепт — см. «Рецепты ИИ» в админке`;
+    toast(msg);
+  } catch (err){
+    errBox.textContent = 'Ошибка сбора составных полей: ' + err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+    updateAiExtractHint();
   }
 }
 

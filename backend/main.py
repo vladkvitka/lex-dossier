@@ -86,6 +86,15 @@ STORAGE_CASES_DIR = "/var/lex-dossier/storage/cases"
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 DEFAULT_AI_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.5")
+# Прокси для исходящих запросов к OpenRouter — нужен, когда IP самого
+# сервера заблокирован защитой OpenRouter (WAF/антибот блокирует хостинговые
+# IP независимо от валидности ключа — реальный случай, с которым уже
+# столкнулись на проде). Формат — обычный URL прокси, например:
+#   http://login:pароль@1.2.3.4:8080
+#   socks5://login:пароль@1.2.3.4:1080
+# Если переменная не задана — запросы идут напрямую, как раньше (ничего не
+# ломается для окружений, где прокси не нужен).
+OPENROUTER_PROXY_URL = os.environ.get("OPENROUTER_PROXY_URL")
 AI_MODEL_SETTING_KEY = "ai_extract_model"
 
 # Каталог моделей, из которых админ может выбирать в разделе "Настройки ИИ".
@@ -1328,23 +1337,26 @@ def _call_openrouter_json(system_prompt: str, user_text: str, model: str) -> Tup
         raise HTTPException(status_code=500, detail="ИИ не настроен: не задан OPENROUTER_API_KEY на сервере")
 
     try:
-        resp = httpx.post(
-            OPENROUTER_URL,
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_text},
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0,
-            },
-            timeout=60,
-        )
+        client_kwargs = {"timeout": 60}
+        if OPENROUTER_PROXY_URL:
+            client_kwargs["proxy"] = OPENROUTER_PROXY_URL
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.post(
+                OPENROUTER_URL,
+                headers={
+                    "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_text},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0,
+                },
+            )
         resp.raise_for_status()
     except httpx.HTTPStatusError as e:
         # Достаём человекочитаемое сообщение из тела ответа OpenRouter (у них

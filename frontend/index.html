@@ -169,6 +169,19 @@
             <div id="caseNarrativeBox" style="margin-top:22px;">
               <h2 style="font-size:15px;margin:0 0 10px;">Фабула дела</h2>
               <div class="upload-zone" style="max-width:none;">
+                <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);">
+                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+                    <strong style="font-size:12.5px;color:var(--ink);">Сканы документов (медсправки, эпикризы, отказы и т.п.)</strong>
+                    <label class="btn btn-sm" style="margin:0;">
+                      Загрузить файлы
+                      <input type="file" id="caseAttachmentInput" accept="image/jpeg,image/png,image/webp,application/pdf" multiple style="display:none;" onchange="uploadCaseAttachments(this.files)">
+                    </label>
+                  </div>
+                  <div style="color:var(--muted);font-size:11.5px;margin-bottom:8px;">JPG, PNG, WEBP или PDF, до 15 МБ на файл. Файлы уходят во внешний ИИ-сервис вместе с текстом фабулы при разборе — не загружайте лишнего.</div>
+                  <div id="caseAttachmentsList"></div>
+                  <div class="login-error" id="caseAttachmentsError" style="margin-top:8px;"></div>
+                </div>
+
                 <div class="field" style="margin-bottom:10px;">
                   <textarea id="caseNarrativeText" rows="6" placeholder="Вставьте сюда сырой текст фабулы от клиента — ИИ попробует найти в нём значения для простых полей формы (ФИО, даты, адреса и т.п.)"
                     oninput="scheduleSaveNarrative()"></textarea>
@@ -474,6 +487,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=21"></script>
+<script src="app.js?v=22"></script>
 </body>
 </html>

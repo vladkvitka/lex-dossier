@@ -230,3 +230,24 @@ class AIFieldRecipe(Base):
     label = Column(String, nullable=False)
     instructions = Column(Text, nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+
+class CaseAttachment(Base):
+    """Скан/фото документа, приложенного к делу (медицинская справка,
+    эпикриз, отказ в направлении на ВВК и т.п.) — этап 4 ИИ-модуля.
+
+    Хранится ОТДЕЛЬНО от сгенерированных документов дела (CaseDocument) —
+    это исходники от клиента, а не результат работы юриста. Файл лежит на
+    диске, путь — здесь. Содержимое НЕ дублируется в базе (в отличие от
+    некоторых текстовых полей) — сканы могут быть тяжёлыми, а нужны только
+    как временный источник данных для ИИ-разбора, не как постоянное
+    архивное хранилище."""
+    __tablename__ = "case_attachments"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
+    original_filename = Column(String, nullable=False)
+    content_type = Column(String, nullable=False)  # 'image/jpeg' | 'image/png' | 'image/webp' | 'application/pdf'
+    file_path = Column(String, nullable=False)
+    uploaded_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    uploaded_at = Column(DateTime(timezone=True), server_default=func.now())

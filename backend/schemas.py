@@ -270,6 +270,7 @@ class ExtractedFieldResult(BaseModel):
 class ExtractFieldsResponse(BaseModel):
     results: List[ExtractedFieldResult] = []
     model_used: str
+    attachments_used: int = 0
 
 
 # ---------- Настройка ИИ-модели (админ) ----------
@@ -354,3 +355,17 @@ class DraftFieldsResponse(BaseModel):
     results: List[DraftedFieldResult] = []
     facts: List[FactItemOut] = []  # собранные факты — для прозрачности, можно показать юристу отдельно
     model_used: str
+    attachments_used: int = 0
+
+
+# ---------- Сканы документов дела (этап 4) ----------
+
+class CaseAttachmentOut(BaseModel):
+    id: UUID
+    original_filename: str
+    content_type: str
+    uploaded_at: datetime
+    uploaded_by_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True

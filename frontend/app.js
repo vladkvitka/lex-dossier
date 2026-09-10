@@ -1293,7 +1293,9 @@ async function openCase(caseId){
 
     document.getElementById('caseNarrativeText').value = currentCase.raw_narrative || '';
     document.getElementById('aiExtractError').style.display = 'none';
+    document.getElementById('aiFactsPanel').style.display = 'none';
     aiExtractionMeta = {};
+    loadCaseAttachments();
 
     const available = currentAvailableTemplates();
 
@@ -1643,6 +1645,68 @@ async function loadAiRequestsLog(){
   }
 }
 
+// ---------- сканы документов дела (этап 4) ----------
+
+const ATTACHMENT_ICONS = { 'application/pdf': '📄', 'image/jpeg': '🖼', 'image/png': '🖼', 'image/webp': '🖼' };
+
+async function loadCaseAttachments(){
+  if (!currentCase) return;
+  try {
+    const list = await api(`/cases/${currentCase.id}/attachments`);
+    renderCaseAttachments(list);
+  } catch (err){
+    document.getElementById('caseAttachmentsList').innerHTML =
+      `<div style="color:var(--wine);font-size:12px;">Не удалось загрузить список сканов: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderCaseAttachments(list){
+  const box = document.getElementById('caseAttachmentsList');
+  if (!list.length){
+    box.innerHTML = '<div style="color:var(--muted);font-size:12px;">Сканы пока не загружены</div>';
+    return;
+  }
+  box.innerHTML = list.map(a => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft);">
+      <span style="font-size:12.5px;">${ATTACHMENT_ICONS[a.content_type] || '📎'} ${escapeHtml(a.original_filename)}</span>
+      <button class="icon-btn danger" title="Удалить" onclick="deleteCaseAttachment('${a.id}')">🗑</button>
+    </div>`).join('');
+}
+
+async function uploadCaseAttachments(fileList){
+  if (!currentCase || !fileList || !fileList.length) return;
+  const errBox = document.getElementById('caseAttachmentsError');
+  errBox.style.display = 'none';
+
+  const formData = new FormData();
+  for (const file of fileList) formData.append('files', file);
+
+  try {
+    await api(`/cases/${currentCase.id}/attachments`, { method: 'POST', body: formData });
+    await loadCaseAttachments();
+    toast('Сканы загружены');
+  } catch (err){
+    errBox.textContent = 'Не удалось загрузить файлы: ' + err.message;
+    errBox.style.display = 'block';
+  } finally {
+    document.getElementById('caseAttachmentInput').value = ''; // чтобы можно было выбрать те же файлы повторно при ошибке
+  }
+}
+
+async function deleteCaseAttachment(attachmentId){
+  if (!currentCase) return;
+  const ok = window.confirm('Удалить этот скан? Файл будет удалён с сервера безвозвратно.');
+  if (!ok) return;
+  try {
+    await api(`/cases/${currentCase.id}/attachments/${attachmentId}`, { method: 'DELETE' });
+    await loadCaseAttachments();
+  } catch (err){
+    const errBox = document.getElementById('caseAttachmentsError');
+    errBox.textContent = 'Не удалось удалить скан: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
 // ---------- фабула дела + ИИ-разбор простых полей (этап 1) ----------
 
 function scheduleSaveNarrative(){
@@ -1731,8 +1795,9 @@ async function runAiExtractFields(){
     const confirmedSkipped = (result.results || []).filter(r => r.skipped_reason === 'confirmed_by_user').length;
     const notFound = (result.results || []).filter(r => r.skipped_reason === 'empty').length;
     let msg = `ИИ заполнил полей: ${applied}`;
-    if (notFound) msg += `, не найдено в тексте: ${notFound}`;
+    if (notFound) msg += `, не найдено: ${notFound}`;
     if (confirmedSkipped) msg += `, пропущено (уже подтверждено вами): ${confirmedSkipped}`;
+    if (result.attachments_used) msg += `. Учтено сканов: ${result.attachments_used}`;
     toast(msg);
   } catch (err){
     errBox.textContent = 'Ошибка разбора: ' + err.message;
@@ -1808,6 +1873,7 @@ async function runAiDraftFields(){
     let msg = `ИИ собрал полей: ${applied}`;
     if (confirmedSkipped) msg += `, пропущено (уже подтверждено вами): ${confirmedSkipped}`;
     if (usedGeneric) msg += `. Для ${usedGeneric} из них ещё не настроен точный рецепт — см. «Рецепты ИИ» в админке`;
+    if (result.attachments_used) msg += `. Учтено сканов: ${result.attachments_used}`;
     toast(msg);
   } catch (err){
     errBox.textContent = 'Ошибка сбора составных полей: ' + err.message;

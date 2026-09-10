@@ -9,6 +9,8 @@ python-jose[cryptography]
 pydantic
 python-multipart
 httpx[socks]
+PyMuPDF
+Pillow
 docx2txt
 python-docx
 docxtpl==0.16.7

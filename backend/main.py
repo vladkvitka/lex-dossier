@@ -8,6 +8,9 @@ import tempfile
 import uuid
 import zipfile
 import io
+import base64
+import pymupdf
+from PIL import Image
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Tuple
 
@@ -62,6 +65,7 @@ from schemas import (
     FactItemOut,
     DraftedFieldResult,
     DraftFieldsResponse,
+    CaseAttachmentOut,
 )
 from security import verify_password, create_access_token
 from deps import get_current_user, require_admin
@@ -132,6 +136,17 @@ AI_MODEL_CATALOG = [
 # числа стоит поправить, оценка пересчитается автоматически везде.
 AI_COST_ESTIMATE_PROMPT_TOKENS = 1500
 AI_COST_ESTIMATE_COMPLETION_TOKENS = 400
+
+# ---------- Сканы документов дела (этап 4) ----------
+ALLOWED_ATTACHMENT_TYPES = ("image/jpeg", "image/png", "image/webp", "application/pdf")
+MAX_ATTACHMENT_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ на файл
+MAX_ATTACHMENTS_PER_CASE = 15  # разумный потолок, чтобы на одно дело не заливали десятки файлов
+# Ограничения ниже — не про качество распознавания, а про то, чтобы один
+# вызов ИИ не разогнался по стоимости и объёму неконтролируемо, если юрист
+# приложит сразу много многостраничных PDF.
+AI_MAX_IMAGES_PER_CALL = 8
+AI_MAX_PDF_PAGES_PER_FILE = 5
+AI_IMAGE_MAX_DIMENSION = 1600  # px по длинной стороне — для распознавания текста справки этого достаточно
 
 
 def _estimate_call_cost(price_in: float, price_out: float) -> float:
@@ -1247,25 +1262,36 @@ def _collect_textarea_ai_fields(db: Session, templates: List[models.Template]) -
     return _collect_ai_fields_by_type(db, templates, ("textarea",))
 
 
-def _build_extract_system_prompt(fields: List[dict]) -> str:
+def _build_extract_system_prompt(fields: List[dict], has_images: bool) -> str:
     field_lines = "\n".join(f"- {f['group_key']} — {f['label']} ({f['field_type']})" for f in fields)
+    scans_note = (
+        "\nКроме текста фабулы, тебе также приложены сканы/фото документов (медицинские справки, "
+        "свидетельства, отказы и т.п.) — ищи значения полей и в них тоже, не только в тексте.\n"
+        if has_images else ""
+    )
+    scans_snippet_rule = (
+        " Если значение найдено на приложенном скане, а не в тексте — вместо цитаты укажи в "
+        "source_snippet, на каком именно скане (например \"Скан 2\")."
+        if has_images else ""
+    )
     return (
-        "Ты — ассистент юриста. Тебе дан сырой текст фабулы дела клиента юридической компании.\n"
-        "Твоя задача — найти в тексте значения для перечисленных ниже полей и вернуть СТРОГО JSON, "
+        "Ты — ассистент юриста. Тебе дан сырой текст фабулы дела клиента юридической компании."
+        f"{scans_note}\n"
+        "Твоя задача — найти значения для перечисленных ниже полей и вернуть СТРОГО JSON, "
         "без пояснений, без markdown-разметки и без обёртки в ```.\n\n"
         "Список полей (ключ — название — тип):\n"
         f"{field_lines}\n\n"
         "Правила:\n"
-        "1. Если значение поля явно есть в тексте — впиши его в \"value\" в чистом виде, без лишних слов. "
-        "Для полей с типом (date) верни дату СТРОГО в формате ГГГГ-ММ-ДД (например 1990-01-05) — это формат "
-        "хранения дат в системе, а не для показа в документе. Для остальных типов пиши как принято в "
-        "естественном русском тексте.\n"
-        "2. Если значения в тексте нет — верни \"value\": \"\" (пустая строка). НИКОГДА не придумывай и не "
-        "додумывай данные, которых нет в тексте.\n"
+        "1. Если значение поля явно есть в источниках — впиши его в \"value\" в чистом виде, без лишних "
+        "слов. Для полей с типом (date) верни дату СТРОГО в формате ГГГГ-ММ-ДД (например 1990-01-05) — "
+        "это формат хранения дат в системе, а не для показа в документе. Для остальных типов пиши как "
+        "принято в естественном русском тексте.\n"
+        "2. Если значения нигде нет — верни \"value\": \"\" (пустая строка). НИКОГДА не придумывай и не "
+        "додумывай данные, которых нет в источниках.\n"
         "3. В \"confidence\" укажи \"high\", если значение указано явно и однозначно, и \"low\", если ты "
         "вывел его косвенно/предположительно. Для пустого value confidence всегда \"low\".\n"
         "4. В \"source_snippet\" приведи короткую цитату из текста (не длиннее 12-15 слов), на основании "
-        "которой определено значение. Для пустого value — пустая строка.\n\n"
+        f"которой определено значение.{scans_snippet_rule} Для пустого value — пустая строка.\n\n"
         "Формат ответа — JSON-объект, ключи — это ровно переданные ключи полей:\n"
         "{\n"
         '  "ключ_поля": {"value": "...", "confidence": "high"|"low", "source_snippet": "..."},\n'
@@ -1274,23 +1300,33 @@ def _build_extract_system_prompt(fields: List[dict]) -> str:
     )
 
 
-def _build_facts_system_prompt() -> str:
+def _build_facts_system_prompt(has_images: bool) -> str:
     """Промпт первого прохода — только сбор фактов, никакой юридической
     формулировки. Специально отделён от второго прохода (см.
     _build_synthesis_system_prompt): так весь список фактов виден целиком и
     его можно сверить с текстом фабулы, прежде чем он пойдёт в юридический
     текст — это и есть механизм контроля от додумывания фактов."""
     return (
-        "Ты — ассистент юриста. Тебе дан текст фабулы дела клиента юридической компании.\n"
-        "Составь список фактов/событий, упомянутых в тексте, в хронологическом порядке "
+        "Ты — ассистент юриста. Тебе дан текст фабулы дела клиента юридической компании."
+        + (
+            " Кроме текста, тебе также приложены сканы/фото документов (медицинские справки, "
+            "эпикризы, отказы и т.п.) — учитывай события из них тоже.\n"
+            if has_images else "\n"
+        )
+        + "Составь список фактов/событий, упомянутых в источниках, в хронологическом порядке "
         "(насколько это возможно по имеющимся датам).\n\n"
         "Правила:\n"
         "1. Каждый факт — одно событие: обращение, происшествие, решение, документ, разговор и т.п.\n"
-        "2. Если у события есть дата в тексте — укажи её в поле \"date\" в формате ДД.ММ.ГГГГ. Если "
-        "дата не указана явно — оставь \"date\": null, но всё равно включи событие в список.\n"
-        "3. В поле \"event\" опиши событие кратко, но со всеми значимыми деталями ИЗ ТЕКСТА (кто, что, "
-        "где, с каким результатом). НИЧЕГО не добавляй от себя.\n"
-        "4. Не пропускай события, даже если они кажутся малозначительными.\n\n"
+        "2. Если у события есть дата — укажи её в поле \"date\" в формате ДД.ММ.ГГГГ. Если дата не "
+        "указана явно — оставь \"date\": null, но всё равно включи событие в список.\n"
+        "3. В поле \"event\" опиши событие кратко, но со всеми значимыми деталями ИЗ ИСТОЧНИКОВ (кто, "
+        "что, где, с каким результатом). НИЧЕГО не добавляй от себя.\n"
+        + (
+            "4. Если факт взят с приложенного скана, а не из текста фабулы — укажи это в начале "
+            "описания события, например: \"(Скан 2) Диагноз при поступлении...\".\n"
+            if has_images else ""
+        )
+        + "5. Не пропускай события, даже если они кажутся малозначительными.\n\n"
         "Ответ — строго JSON-объект вида:\n"
         '{"facts": [{"date": "ДД.ММ.ГГГГ"|null, "event": "..."}, ...]}\n'
         "Без пояснений, без markdown, без обёртки в ```."
@@ -1329,17 +1365,32 @@ def _build_synthesis_system_prompt(facts: List[dict], fields: List[dict]) -> str
     )
 
 
-def _call_openrouter_json(system_prompt: str, user_text: str, model: str) -> Tuple[dict, dict]:
+def _call_openrouter_json(system_prompt: str, user_text: str, model: str, images: Optional[List[dict]] = None) -> Tuple[dict, dict]:
     """Дёргает OpenRouter, возвращает (разобранный JSON-ответ, usage-словарь).
     Бросает HTTPException с понятным текстом при любой проблеме — ключ не
     задан, сеть недоступна, модель ответила не-JSON-ом и т.п. Намеренно не
     глотает ошибки молча: юрист должен видеть, что разбор не удался, а не
-    получить пустую форму без объяснений."""
+    получить пустую форму без объяснений.
+
+    Если передан images (см. _prepare_attachment_images) — собирает
+    мультимодальное сообщение (текст + картинки) по формату OpenAI-style
+    API, который понимает OpenRouter. Без сканов ведёт себя как раньше —
+    просто текстовое сообщение."""
     if not OPENROUTER_API_KEY:
         raise HTTPException(status_code=500, detail="ИИ не настроен: не задан OPENROUTER_API_KEY на сервере")
 
+    if images:
+        user_content = [{"type": "text", "text": user_text}]
+        for img in images:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{img['mime']};base64,{img['b64']}"},
+            })
+    else:
+        user_content = user_text
+
     try:
-        client_kwargs = {"timeout": 60}
+        client_kwargs = {"timeout": 90 if images else 60}
         if OPENROUTER_PROXY_URL:
             client_kwargs["proxy"] = OPENROUTER_PROXY_URL
         with httpx.Client(**client_kwargs) as client:
@@ -1353,7 +1404,7 @@ def _call_openrouter_json(system_prompt: str, user_text: str, model: str) -> Tup
                     "model": model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_text},
+                        {"role": "user", "content": user_content},
                     ],
                     "response_format": {"type": "json_object"},
                     "temperature": 0,
@@ -1426,6 +1477,79 @@ def _normalize_ai_date_value(raw: str) -> str:
         pass
     return raw
 
+
+def _downscale_and_encode_image(raw_bytes: bytes) -> str:
+    """Уменьшает изображение до разумного размера и перекодирует в JPEG
+    перед отправкой в ИИ — экономит токены (а значит и деньги) и не требует
+    качества выше того, что нужно для распознавания текста в справке.
+    Если не удалось декодировать/пересжать — отправляем исходные байты как
+    есть: лучше отправить оригинал, чем не отправить ничего."""
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        img = img.convert("RGB")
+        if max(img.size) > AI_IMAGE_MAX_DIMENSION:
+            ratio = AI_IMAGE_MAX_DIMENSION / max(img.size)
+            img = img.resize((max(1, int(img.width * ratio)), max(1, int(img.height * ratio))))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as e:
+        print(f"[ai-attachments] не удалось пересжать изображение, отправляю как есть: {e}", file=sys.stderr)
+        return base64.b64encode(raw_bytes).decode("ascii")
+
+
+def _prepare_attachment_images(db: Session, case_id: uuid.UUID) -> List[dict]:
+    """Готовит приложенные к делу сканы для отправки в ИИ вместе с текстом
+    фабулы: картинки — сжимает, PDF — рендерит постранично в картинки
+    (текст из PDF намеренно не извлекается отдельно текстовым слоем —
+    распознаванием занимается сама модель, ей проще работать с изображением
+    страницы целиком, чем с разрозненным текстовым слоем плохо
+    отсканированного документа). Возвращает список {"mime", "b64", "label"},
+    где label — подпись вида "Скан 2 (spravka.jpg)" для использования в
+    source_snippet/списке фактов.
+
+    Ограничено AI_MAX_IMAGES_PER_CALL суммарно по делу — не по вине одного
+    файла, а чтобы стоимость и объём одного вызова были предсказуемыми."""
+    attachments = (
+        db.query(models.CaseAttachment)
+        .filter(models.CaseAttachment.case_id == case_id)
+        .order_by(models.CaseAttachment.uploaded_at)
+        .all()
+    )
+
+    images: List[dict] = []
+    for index, att in enumerate(attachments, start=1):
+        if len(images) >= AI_MAX_IMAGES_PER_CALL:
+            break
+        label_base = f"Скан {index} ({att.original_filename})"
+        try:
+            if att.content_type == "application/pdf":
+                doc = pymupdf.open(att.file_path)
+                pages_to_render = min(len(doc), AI_MAX_PDF_PAGES_PER_FILE)
+                for page_index in range(pages_to_render):
+                    if len(images) >= AI_MAX_IMAGES_PER_CALL:
+                        break
+                    page = doc[page_index]
+                    pix = page.get_pixmap(dpi=150)
+                    b64 = _downscale_and_encode_image(pix.tobytes("png"))
+                    label = label_base if pages_to_render == 1 else f"{label_base}, стр. {page_index + 1}"
+                    images.append({"mime": "image/jpeg", "b64": b64, "label": label})
+                doc.close()
+            else:
+                with open(att.file_path, "rb") as f:
+                    raw = f.read()
+                b64 = _downscale_and_encode_image(raw)
+                images.append({"mime": "image/jpeg", "b64": b64, "label": label_base})
+        except Exception as e:
+            # Один нечитаемый файл не должен ронять весь разбор — пропускаем
+            # его и идём дальше, оставляя след в логе сервера для
+            # разработчика (это техническая деталь, не для юриста).
+            print(f"[ai-attachments] не удалось подготовить скан {att.id} ({att.original_filename}): {e}", file=sys.stderr)
+            continue
+
+    return images
+
+
 def _log_ai_request(
     db: Session,
     case_id: uuid.UUID,
@@ -1457,6 +1581,127 @@ def _log_ai_request(
     except Exception as e:  # noqa: BLE001 — логирование не должно ломать основной запрос
         db.rollback()
         print(f"[ai-log] не удалось записать лог ИИ-запроса: {e}", file=sys.stderr)
+
+
+@app.post("/api/cases/{case_id}/attachments", response_model=List[CaseAttachmentOut])
+def upload_case_attachments(
+    case_id: uuid.UUID,
+    files: List[UploadFile] = File(...),
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    """Загрузка сканов/фото документов к делу (медицинские справки, эпикризы,
+    отказы в направлении на ВВК и т.п.) — этап 4 ИИ-модуля. Файлы участвуют
+    в ИИ-разборе наравне с текстом фабулы (см. _prepare_attachment_images),
+    но НЕ являются частью самого дела в смысле сгенерированных документов —
+    это исходники от клиента."""
+    case = db.query(models.Case).filter(models.Case.id == case_id).first()
+    if not case:
+        raise HTTPException(status_code=404, detail="Дело не найдено")
+
+    existing_count = db.query(models.CaseAttachment).filter(models.CaseAttachment.case_id == case_id).count()
+    if existing_count + len(files) > MAX_ATTACHMENTS_PER_CASE:
+        raise HTTPException(status_code=400, detail=f"Слишком много сканов для одного дела (максимум {MAX_ATTACHMENTS_PER_CASE})")
+
+    case_dir = os.path.join(STORAGE_CASES_DIR, str(case_id), "attachments")
+    os.makedirs(case_dir, exist_ok=True)
+
+    ext_by_type = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "application/pdf": ".pdf"}
+    created: List[models.CaseAttachment] = []
+
+    for file in files:
+        content_type = file.content_type
+        if content_type not in ALLOWED_ATTACHMENT_TYPES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Неподдерживаемый тип файла: {file.filename} ({content_type}). Разрешены: JPG, PNG, WEBP, PDF",
+            )
+
+        contents = file.file.read()
+        if len(contents) > MAX_ATTACHMENT_SIZE_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Файл {file.filename} больше {MAX_ATTACHMENT_SIZE_BYTES // (1024 * 1024)} МБ",
+            )
+
+        attachment_id = uuid.uuid4()
+        file_path = os.path.join(case_dir, f"{attachment_id}{ext_by_type[content_type]}")
+        with open(file_path, "wb") as f:
+            f.write(contents)
+
+        attachment = models.CaseAttachment(
+            id=attachment_id,
+            case_id=case_id,
+            original_filename=file.filename,
+            content_type=content_type,
+            file_path=file_path,
+            uploaded_by=current_user.id,
+        )
+        db.add(attachment)
+        created.append(attachment)
+
+    db.commit()
+    for a in created:
+        db.refresh(a)
+
+    return [
+        CaseAttachmentOut(
+            id=a.id,
+            original_filename=a.original_filename,
+            content_type=a.content_type,
+            uploaded_at=a.uploaded_at,
+            uploaded_by_name=current_user.full_name,
+        )
+        for a in created
+    ]
+
+
+@app.get("/api/cases/{case_id}/attachments", response_model=List[CaseAttachmentOut])
+def list_case_attachments(
+    case_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    rows = (
+        db.query(models.CaseAttachment, models.User.full_name)
+        .outerjoin(models.User, models.User.id == models.CaseAttachment.uploaded_by)
+        .filter(models.CaseAttachment.case_id == case_id)
+        .order_by(models.CaseAttachment.uploaded_at)
+        .all()
+    )
+    return [
+        CaseAttachmentOut(
+            id=a.id, original_filename=a.original_filename, content_type=a.content_type,
+            uploaded_at=a.uploaded_at, uploaded_by_name=name,
+        )
+        for a, name in rows
+    ]
+
+
+@app.delete("/api/cases/{case_id}/attachments/{attachment_id}")
+def delete_case_attachment(
+    case_id: uuid.UUID,
+    attachment_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(get_current_user),
+):
+    attachment = (
+        db.query(models.CaseAttachment)
+        .filter(models.CaseAttachment.id == attachment_id, models.CaseAttachment.case_id == case_id)
+        .first()
+    )
+    if not attachment:
+        raise HTTPException(status_code=404, detail="Скан не найден")
+
+    try:
+        if os.path.exists(attachment.file_path):
+            os.remove(attachment.file_path)
+    except OSError as e:
+        print(f"[attachments] не удалось удалить файл {attachment.file_path}: {e}", file=sys.stderr)
+
+    db.delete(attachment)
+    db.commit()
+    return {"ok": True}
 
 
 @app.post("/api/cases/{case_id}/ai/extract-fields", response_model=ExtractFieldsResponse)
@@ -1495,11 +1740,12 @@ def extract_fields_from_narrative(
     if not fields:
         raise HTTPException(status_code=400, detail="В выбранных документах нет простых полей для заполнения")
 
-    system_prompt = _build_extract_system_prompt(fields)
     ai_model = _get_ai_model(db)
+    images = _prepare_attachment_images(db, case_id)
+    system_prompt = _build_extract_system_prompt(fields, has_images=bool(images))
 
     try:
-        parsed, usage = _call_openrouter_json(system_prompt, narrative, ai_model)
+        parsed, usage = _call_openrouter_json(system_prompt, narrative, ai_model, images=images)
     except HTTPException as e:
         _log_ai_request(
             db, case_id, "extract_fields", ai_model, {}, None,
@@ -1566,12 +1812,13 @@ def extract_fields_from_narrative(
 
     db.commit()
 
+    log_summary["_meta"] = {"attachments_used": len(images)}
     _log_ai_request(
         db, case_id, "extract_fields", ai_model, usage, log_summary,
         success=True, error_message=None, user_id=current_user.id,
     )
 
-    return ExtractFieldsResponse(results=results, model_used=ai_model)
+    return ExtractFieldsResponse(results=results, model_used=ai_model, attachments_used=len(images))
 
 
 @app.get("/api/admin/ai-settings", response_model=AiSettingsOut)
@@ -1766,11 +2013,17 @@ def draft_composite_fields_from_narrative(
         raise HTTPException(status_code=400, detail="В выбранных документах нет составных полей (хронология/обстоятельства и т.п.)")
 
     ai_model = _get_ai_model(db)
+    images = _prepare_attachment_images(db, case_id)
 
     # ---- Шаг 1: сбор фактов ----
-    facts_prompt = _build_facts_system_prompt()
+    # Сканы подключаются именно сюда, а не в шаг 2 — по архитектуре модуля
+    # (см. _build_synthesis_system_prompt) второй проход работает ТОЛЬКО со
+    # списком фактов, не видит исходники повторно. Это специально: единая
+    # точка, где источники (текст + сканы) превращаются в факты, упрощает
+    # проверку "не придумал ли ИИ чего-то, чего не было в источниках".
+    facts_prompt = _build_facts_system_prompt(has_images=bool(images))
     try:
-        facts_parsed, usage1 = _call_openrouter_json(facts_prompt, narrative, ai_model)
+        facts_parsed, usage1 = _call_openrouter_json(facts_prompt, narrative, ai_model, images=images)
     except HTTPException as e:
         _log_ai_request(db, case_id, "draft_facts", ai_model, {}, None, success=False, error_message=e.detail, user_id=current_user.id)
         raise
@@ -1787,7 +2040,7 @@ def draft_composite_fields_from_narrative(
                          success=True, error_message=None, user_id=current_user.id)
         raise HTTPException(status_code=400, detail="Не удалось выделить факты из текста фабулы — уточните текст и попробуйте снова")
 
-    _log_ai_request(db, case_id, "draft_facts", ai_model, usage1, {"facts_count": len(facts_clean)},
+    _log_ai_request(db, case_id, "draft_facts", ai_model, usage1, {"facts_count": len(facts_clean), "attachments_used": len(images)},
                      success=True, error_message=None, user_id=current_user.id)
 
     # ---- Шаг 2: сборка текста по рецептам ----
@@ -1863,6 +2116,7 @@ def draft_composite_fields_from_narrative(
         results=results,
         facts=[FactItemOut(date=f["date"], event=f["event"]) for f in facts_clean],
         model_used=ai_model,
+        attachments_used=len(images),
     )
 
 

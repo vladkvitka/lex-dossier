@@ -1430,7 +1430,18 @@ def _call_openrouter_json(system_prompt: str, user_text: str, model: str, images
         user_content = user_text
 
     try:
-        client_kwargs = {"timeout": 90 if images else 60}
+        # Запрос со сканами может идти заметно дольше текстового — особенно
+        # если приложено несколько многостраничных PDF (до AI_MAX_IMAGES_PER_CALL
+        # изображений). 90 секунд на практике оказалось впритык. Обратная
+        # сторона: если перед бэкендом стоит nginx (или другой reverse proxy)
+        # с собственным таймаутом (по умолчанию у nginx обычно 60 секунд) —
+        # он может оборвать соединение РАНЬШЕ, чем сработает этот таймаут, и
+        # тогда клиент получит 504 от прокси, а не понятную ошибку от нас
+        # (при этом сам запрос к OpenRouter к этому моменту может уже
+        # успешно завершиться и списать деньги — просто ответ не успевает
+        # дойти до браузера). Таймаут прокси-сервера нужно поднять отдельно,
+        # это вне кода приложения — см. docs/ai-setup.md.
+        client_kwargs = {"timeout": 150 if images else 90}
         if OPENROUTER_PROXY_URL:
             client_kwargs["proxy"] = OPENROUTER_PROXY_URL
         with httpx.Client(**client_kwargs) as client:

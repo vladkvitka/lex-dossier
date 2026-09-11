@@ -126,21 +126,37 @@ AI_PURPOSES = {
 # моделями, реально подходящими под задачу — не все модели каждого
 # провайдера, а по 2-3 самых уместных: одна экономичная "рабочая лошадка" и
 # одна более мощная на случай, если дешёвая модель начнёт ошибаться.
+#
+# supports_images — умеет ли модель принимать картинки (сканы документов).
+# Важно ТОЛЬКО для назначения "analyze" (разбор простых полей + сбор
+# фактов) — именно туда, при наличии сканов у дела, уходят изображения.
+# Назначение "draft" (составление текста) картинок не получает вообще (см.
+# _build_synthesis_system_prompt — работает только со списком фактов), так
+# что для него этот флаг не имеет значения. Некоторые модели одного и того
+# же семейства бывают текстовыми (например обычный DeepSeek V4 Flash) — их
+# выбор для "analyze" при наличии сканов приведёт к явной ошибке от
+# OpenRouter ("No endpoints found that support image input"), поэтому это
+# учитывается заранее в analyze_case_with_ai, а не выясняется постфактум.
 AI_MODEL_CATALOG = [
     {"slug": "anthropic/claude-haiku-4.5", "provider": "Anthropic", "label": "Claude Haiku 4.5",
-     "price_in": 1.00, "price_out": 5.00, "note": "Быстрая и дешёвая, хорошая точка старта"},
+     "price_in": 1.00, "price_out": 5.00, "supports_images": True,
+     "note": "Быстрая и дешёвая, хорошая точка старта"},
     {"slug": "anthropic/claude-sonnet-4.6", "provider": "Anthropic", "label": "Claude Sonnet 4.6",
-     "price_in": 3.00, "price_out": 15.00, "note": "Если дешёвая модель начнёт ошибаться"},
+     "price_in": 3.00, "price_out": 15.00, "supports_images": True,
+     "note": "Если дешёвая модель начнёт ошибаться"},
     {"slug": "openai/gpt-5-mini", "provider": "OpenAI", "label": "GPT-5 Mini",
-     "price_in": 0.25, "price_out": 2.00, "note": "Экономичный вариант от OpenAI"},
+     "price_in": 0.25, "price_out": 2.00, "supports_images": True,
+     "note": "Экономичный вариант от OpenAI"},
     {"slug": "openai/gpt-5", "provider": "OpenAI", "label": "GPT-5",
-     "price_in": 1.25, "price_out": 10.00, "note": None},
+     "price_in": 1.25, "price_out": 10.00, "supports_images": True, "note": None},
     {"slug": "deepseek/deepseek-v4-flash", "provider": "DeepSeek", "label": "DeepSeek V4 Flash",
-     "price_in": 0.05, "price_out": 0.10, "note": "Самый дешёвый вариант в списке — стоит проверить качество перед массовым использованием"},
+     "price_in": 0.05, "price_out": 0.10, "supports_images": False,
+     "note": "Только текст, БЕЗ поддержки сканов — не выбирайте для разбора, если у дел есть сканы"},
     {"slug": "deepseek/deepseek-v4-pro", "provider": "DeepSeek", "label": "DeepSeek V4 Pro",
-     "price_in": 0.60, "price_out": 1.75, "note": None},
+     "price_in": 0.60, "price_out": 1.75, "supports_images": False,
+     "note": "Только текст, БЕЗ поддержки сканов — не выбирайте для разбора, если у дел есть сканы"},
     {"slug": "google/gemini-3-flash-preview", "provider": "Google", "label": "Gemini 3 Flash",
-     "price_in": 0.50, "price_out": 3.00, "note": None},
+     "price_in": 0.50, "price_out": 3.00, "supports_images": True, "note": None},
 ]
 
 # Для расчётной стоимости одного обращения используем усреднённый размер
@@ -1740,8 +1756,7 @@ def analyze_case_with_ai(
         raise HTTPException(status_code=404, detail="Дело не найдено")
 
     narrative = data.raw_narrative if data.raw_narrative is not None else case.raw_narrative
-    if not narrative or not narrative.strip():
-        raise HTTPException(status_code=400, detail="Нет текста фабулы для разбора")
+    narrative = (narrative or "").strip()
 
     if data.raw_narrative is not None:
         case.raw_narrative = data.raw_narrative
@@ -1758,10 +1773,39 @@ def analyze_case_with_ai(
 
     ai_model = _get_ai_model(db, "analyze")
     images = _prepare_attachment_images(db, case_id)
+
+    # Источник данных — текст ФАБУЛЫ И/ИЛИ сканы. Раньше здесь требовался
+    # обязательно непустой текст, из-за чего разбор было невозможно
+    # запустить, если юрист приложил только сканы и не написал ни слова —
+    # хотя сканов вполне достаточно как источника. Ошибка нужна только если
+    # нет вообще ничего.
+    if not narrative and not images:
+        raise HTTPException(status_code=400, detail="Нет данных для разбора — добавьте текст фабулы или приложите хотя бы один скан")
+
+    # Модель, не умеющая работать с картинками, при наличии сканов вернёт от
+    # OpenRouter малопонятную ошибку вида "No endpoints found that support
+    # image input". Проверяем заранее и даём юристу понятную инструкцию, а
+    # не тратим впустую обращение к ИИ на заведомо обречённый запрос.
+    if images:
+        model_info = next((m for m in AI_MODEL_CATALOG if m["slug"] == ai_model), None)
+        if model_info is not None and not model_info.get("supports_images", True):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Модель «{model_info['label']}», выбранная для разбора, не умеет работать со сканами. "
+                    "Выберите другую модель в разделе «Настройки ИИ» (назначение «Разбор простых полей и сбор "
+                    "фактов»), либо уберите сканы и запустите разбор только по тексту фабулы."
+                ),
+            )
+
     system_prompt = _build_analyze_system_prompt(fields, has_images=bool(images))
+    # Если текста фабулы нет вообще (данные только со сканов) — отправляем
+    # модели короткую заглушку вместо пустой строки: пустой user-текст в
+    # сочетании с картинками не все провайдеры обрабатывают предсказуемо.
+    user_text = narrative or "(текст фабулы не предоставлен — используй только приложенные сканы документов)"
 
     try:
-        parsed, usage = _call_openrouter_json(system_prompt, narrative, ai_model, images=images)
+        parsed, usage = _call_openrouter_json(system_prompt, user_text, ai_model, images=images)
     except HTTPException as e:
         _log_ai_request(
             db, case_id, "analyze", ai_model, {}, None,
@@ -1864,6 +1908,7 @@ def get_ai_settings(
                 price_in_per_million=m["price_in"], price_out_per_million=m["price_out"],
                 estimated_cost_per_call=round(_estimate_call_cost(m["price_in"], m["price_out"]), 4),
                 note=m.get("note"), is_current=(m["slug"] == current),
+                supports_images=m.get("supports_images", True),
             )
             for m in AI_MODEL_CATALOG
         ]

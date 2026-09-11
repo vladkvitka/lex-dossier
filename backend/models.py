@@ -107,6 +107,15 @@ class Case(Base):
     # риска раздувать базу отдельной версионной таблицей ради текста, который
     # обычно правится не построчно, а целиком.
     raw_narrative = Column(Text, nullable=True)
+    # Список фактов, собранных ИИ на шаге "Разобрать дело через ИИ" (кнопка
+    # 1) — JSON-массив [{"date": "...", "event": "..."}, ...]. Хранится
+    # здесь же, а не только в ответе запроса, чтобы кнопка 2 ("Собрать
+    # обстоятельства дела") могла быть нажата в любой момент позже — даже
+    # после перезагрузки страницы или на следующий день — без повторной
+    # отправки сканов и текста фабулы в ИИ (сканы — самая дорогая часть
+    # запроса по токенам, пересылать их повторно ради того же результата
+    # незачем).
+    ai_facts = Column(Text, nullable=True)
     status = Column(String, default="draft")  # draft | in_progress | ready | archived
     # Момент первого нажатия "Сгенерировать документы". До него статус
     # всегда draft. От него отсчитываются 4 рабочих дня до авто-архивации.
@@ -184,7 +193,7 @@ class AIRequestLog(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     case_id = Column(UUID(as_uuid=True), ForeignKey("cases.id"), nullable=False)
-    request_type = Column(String, nullable=False)  # 'extract_fields' | 'draft_facts' | 'draft_narrative'
+    request_type = Column(String, nullable=False)  # 'analyze' (простые поля + факты, кнопка 1) | 'draft_narrative' (составление текста, кнопка 2)
     model_used = Column(String, nullable=True)
     prompt_tokens = Column(Integer, nullable=True)
     completion_tokens = Column(Integer, nullable=True)
@@ -209,26 +218,27 @@ class AppSetting(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class AIFieldRecipe(Base):
-    """"Рецепт" для составного (textarea) поля — инструкция для ИИ, что и в
+class AIFieldPrompt(Base):
+    """Промпт для составного (textarea) поля — инструкция для ИИ, что и в
     каком стиле писать в это конкретное поле (например, для поля "хронология
-    обращений в мед. учреждения" рецепт объясняет модели, что нужно перечислить
-    обращения в хронологическом порядке с датами и результатами, а для поля
-    "обстоятельства получения травмы" — связно описать событие).
+    обращений в мед. учреждения" промпт объясняет модели, что нужно
+    перечислить обращения в хронологическом порядке с датами и
+    результатами, а для поля "обстоятельства получения травмы" — связно
+    описать событие).
 
     Хранится в базе, а НЕ в коде — специально, чтобы админ мог поправить
-    формулировку рецепта под конкретный шаблон без участия программиста, и
-    чтобы при добавлении гражданского направления новые рецепты для его
-    составных полей заводились точно так же, без переписывания кода (см.
-    обсуждение архитектуры в тех.спеке, раздел про масштабирование на второе
+    формулировку под конкретный шаблон без участия программиста, и чтобы при
+    добавлении гражданского направления новые промпты для его составных
+    полей заводились точно так же, без переписывания кода (см. обсуждение
+    архитектуры в тех.спеке, раздел про масштабирование на второе
     направление)."""
-    __tablename__ = "ai_field_recipes"
+    __tablename__ = "ai_field_prompts"
 
     # group_key — тот же ключ, что и field_key/shared_group_key поля в
-    # TemplateField: один рецепт на все шаблоны, где встречается это поле.
+    # TemplateField: один промпт на все шаблоны, где встречается это поле.
     group_key = Column(String, primary_key=True)
     label = Column(String, nullable=False)
-    instructions = Column(Text, nullable=False)
+    prompt_text = Column(Text, nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 

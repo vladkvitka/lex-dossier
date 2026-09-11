@@ -1293,8 +1293,8 @@ async function openCase(caseId){
 
     document.getElementById('caseNarrativeText').value = currentCase.raw_narrative || '';
     document.getElementById('aiExtractError').style.display = 'none';
-    document.getElementById('aiFactsPanel').style.display = 'none';
     aiExtractionMeta = {};
+    renderAiFactsPanel(currentCase.ai_facts || []);
     loadCaseAttachments();
 
     const available = currentAvailableTemplates();
@@ -1303,7 +1303,7 @@ async function openCase(caseId){
     await renderCaseFieldsForm(available);
     renderCaseDocuments();
     renderCaseDocTabs(available);
-    updateAiExtractHint();
+    updateAiButtonsState();
     caseHasPendingChanges = false;
     updateGenerateButtonState();
 
@@ -1382,7 +1382,7 @@ async function onCaseTemplateToggle(){
   const available = currentAvailableTemplates();
   await renderCaseFieldsForm(available);
   renderCaseDocTabs(available);
-  updateAiExtractHint();
+  updateAiButtonsState();
   markCaseHasPendingChanges();
 }
 
@@ -1447,66 +1447,13 @@ function aiBadgeHtml(groupKey, aiFlags){
   const snippet = persistedSnippet || sessionSnippet;
   const title = snippet
     ? `Предложено ИИ по фразе: «${snippet}». Проверьте и при необходимости поправьте — после правки пометка исчезнет.`
-    : 'Предложено ИИ (составное поле — собрано из нескольких фактов фабулы, см. панель "Факты, найденные ИИ" выше). Проверьте и при необходимости поправьте.';
+    : 'Предложено ИИ (составное поле — собрано из фактов, см. панель "Факты, найденные ИИ" выше). Проверьте и при необходимости поправьте.';
   return ` <span class="ai-badge" title="${escapeHtml(title)}">ИИ</span>`;
 }
 
-function caseFieldInputHtml(f, groupKey, value){
-  // Тип поля ограничивает, что можно ввести — например, в "дату" больше
-  // нельзя напечатать буквы: браузер сам не даст ввести некорректный формат.
-  const key = escapeHtml(groupKey);
-  const val = escapeHtml(value);
-  if (f.field_type === 'textarea'){
-    return `<textarea rows="3" data-field-key="${key}" oninput="scheduleRefreshPreview()">${val}</textarea>`;
-  }
-  if (f.field_type === 'date'){
-    // value дела хранится как ISO (yyyy-mm-dd) — так его понимает нативный
-    // date-picker. Но на случай, если в базе всё же осталось значение в
-    // привычном ДД.ММ.ГГГГ (например, из старой записи до исправления
-    // формата в промпте ИИ) — распознаём и такой вид тоже, а не просто
-    // показываем пустое поле там, где данные на самом деле есть.
-    const isoMatch = /^\d{4}-\d{2}-\d{2}$/.test(value);
-    const ruMatch = value.match(/^(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{4})$/);
-    let isoVal = '';
-    if (isoMatch) isoVal = value;
-    else if (ruMatch) isoVal = `${ruMatch[3]}-${ruMatch[2].padStart(2,'0')}-${ruMatch[1].padStart(2,'0')}`;
-    return `<input type="date" data-field-key="${key}" value="${isoVal}" oninput="scheduleRefreshPreview()">`;
-  }
-  if (f.field_type === 'number' || f.field_type === 'money'){
-    return `<input type="number" step="any" inputmode="decimal" data-field-key="${key}" value="${val}" oninput="scheduleRefreshPreview()">`;
-  }
-  return `<input type="text" data-field-key="${key}" value="${val}" oninput="scheduleRefreshPreview()">`;
-}
-
-async function saveCaseFields(opts = {}){
-  const inputs = document.querySelectorAll('#caseFieldsBox [data-field-key]');
-  const values = {};
-  inputs.forEach(el => { values[el.getAttribute('data-field-key')] = el.value; });
-
-  const errBox = document.getElementById('caseFormError');
-  errBox.style.display = 'none';
-  try {
-    currentCase = await api(`/cases/${currentCase.id}/fields`, {
-      method: 'PUT',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(values)
-    });
-    if (!opts.silent) toast('Данные сохранены');
-  } catch (err){
-    // Автосохранение молча повторит попытку при следующем вводе — не
-    // показываем тост на каждую неудачу фонового сохранения, только для
-    // явного вызова (например, перед генерацией).
-    if (!opts.silent){
-      errBox.textContent = 'Ошибка сохранения: ' + err.message;
-      errBox.style.display = 'block';
-    }
-  }
-}
-
-// ---------- админ: настройки ИИ-модели ----------
+// ---------- админ: настройки ИИ-моделей (отдельно на разбор и на составление текста) ----------
 
 async function loadAiSettings(){
-  const body = document.getElementById('aiSettingsBody');
   const notice = document.getElementById('aiSettingsCurrentNotice');
   const errBox = document.getElementById('aiSettingsError');
   errBox.style.display = 'none';
@@ -1518,98 +1465,118 @@ async function loadAiSettings(){
     notice.textContent = '';
     errBox.textContent = 'Не удалось загрузить настройки ИИ: ' + err.message;
     errBox.style.display = 'block';
-    body.innerHTML = '';
   }
 }
 
 function renderAiSettings(data){
   const notice = document.getElementById('aiSettingsCurrentNotice');
-  const body = document.getElementById('aiSettingsBody');
-  const current = data.models.find(m => m.is_current);
-  notice.textContent = current
-    ? `Сейчас используется: ${current.label} (${current.provider}) — расчётно ≈ $${current.estimated_cost_per_call.toFixed(4)} за один разбор фабулы`
-    : `Сейчас используется модель "${data.current_model}" (её нет в списке ниже — выбрана вручную или через .env)`;
+  const summaries = data.purposes.map(p => {
+    const current = p.models.find(m => m.is_current);
+    return current
+      ? `${p.purpose_label}: ${current.label} (≈ $${current.estimated_cost_per_call.toFixed(4)}/запрос)`
+      : `${p.purpose_label}: ${p.current_model} (нет в списке ниже)`;
+  });
+  notice.innerHTML = summaries.join('<br>');
 
-  body.innerHTML = data.models.map(m => `
-    <tr>
-      <td><input type="radio" name="aiModelRadio" value="${escapeHtml(m.slug)}" ${m.is_current ? 'checked' : ''} onchange="selectAiModel('${escapeHtml(m.slug)}')"></td>
-      <td>${escapeHtml(m.label)}${m.is_current ? ' <span class="badge badge-ready">текущая</span>' : ''}</td>
-      <td>${escapeHtml(m.provider)}</td>
-      <td>$${m.price_in_per_million.toFixed(2)} / $${m.price_out_per_million.toFixed(2)}</td>
-      <td>≈ $${m.estimated_cost_per_call.toFixed(4)}</td>
-      <td style="color:var(--muted);font-size:12.5px;">${m.note ? escapeHtml(m.note) : ''}</td>
-    </tr>`).join('');
+  const container = document.getElementById('aiSettingsTables');
+  container.innerHTML = data.purposes.map(p => `
+    <h2 style="font-size:14.5px;margin:22px 0 10px;">${escapeHtml(p.purpose_label)}</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Модель</th>
+            <th>Провайдер</th>
+            <th>Цена вход / выход ($ за 1 млн токенов)</th>
+            <th>≈ Стоимость 1 запроса</th>
+            <th>Заметка</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${p.models.map(m => `
+            <tr>
+              <td><input type="radio" name="aiModelRadio_${p.purpose}" value="${escapeHtml(m.slug)}" ${m.is_current ? 'checked' : ''} onchange="selectAiModel('${p.purpose}', '${escapeHtml(m.slug)}')"></td>
+              <td>${escapeHtml(m.label)}${m.is_current ? ' <span class="badge badge-ready">текущая</span>' : ''}</td>
+              <td>${escapeHtml(m.provider)}</td>
+              <td>$${m.price_in_per_million.toFixed(2)} / $${m.price_out_per_million.toFixed(2)}</td>
+              <td>≈ $${m.estimated_cost_per_call.toFixed(4)}</td>
+              <td style="color:var(--muted);font-size:12.5px;">${m.note ? escapeHtml(m.note) : ''}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`).join('');
 }
 
-async function selectAiModel(slug){
+async function selectAiModel(purpose, slug){
   const errBox = document.getElementById('aiSettingsError');
   errBox.style.display = 'none';
   try {
     const data = await api('/admin/ai-settings', {
       method: 'PATCH',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ model: slug })
+      body: JSON.stringify({ purpose, model: slug })
     });
     renderAiSettings(data);
-    toast('Модель для ИИ-разбора обновлена');
+    toast('Модель обновлена');
   } catch (err){
     errBox.textContent = 'Не удалось переключить модель: ' + err.message;
     errBox.style.display = 'block';
-    loadAiSettings(); // вернуть чекбокс в актуальное состояние
+    loadAiSettings(); // вернуть переключатель в актуальное состояние
   }
 }
 
-// ---------- админ: рецепты ИИ для составных полей ----------
+// ---------- админ: промпты составных полей ----------
 
-async function loadAiFieldRecipes(){
-  const listBox = document.getElementById('aiRecipesList');
-  const errBox = document.getElementById('aiRecipesError');
+async function loadAiFieldPrompts(){
+  const listBox = document.getElementById('aiPromptsList');
+  const errBox = document.getElementById('aiPromptsError');
   errBox.style.display = 'none';
   listBox.innerHTML = 'Загрузка…';
   try {
-    const recipes = await api('/admin/ai-field-recipes');
-    if (!recipes.length){
+    const prompts = await api('/admin/ai-field-prompts');
+    if (!prompts.length){
       listBox.innerHTML = '<div style="color:var(--muted);">Пока нет ни одного составного (textarea) поля ни в одном шаблоне.</div>';
       return;
     }
-    listBox.innerHTML = recipes.map(r => `
+    listBox.innerHTML = prompts.map(p => `
       <div class="upload-zone" style="max-width:none;margin-bottom:14px;">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
-          <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(r.label)}</strong>
-          <span class="fe-key">${escapeHtml(r.group_key)}</span>
+          <strong style="font-size:13.5px;color:var(--ink);">${escapeHtml(p.label)}</strong>
+          <span class="fe-key">${escapeHtml(p.group_key)}</span>
         </div>
-        ${r.has_recipe ? '' : '<div style="color:var(--amber);font-size:12px;margin-bottom:8px;">Рецепт не настроен — сейчас используется общая запасная инструкция</div>'}
+        ${p.has_prompt ? '' : '<div style="color:var(--amber);font-size:12px;margin-bottom:8px;">Промпт не настроен — сейчас используется общий запасной вариант</div>'}
         <div class="field" style="margin-bottom:8px;">
-          <textarea id="recipeText_${escapeHtml(r.group_key)}" rows="3" placeholder="Что и как писать в это поле — например: перечисли обращения в мед. учреждения в хронологическом порядке с датами и результатами каждого обращения">${escapeHtml(r.instructions || '')}</textarea>
+          <textarea id="promptText_${escapeHtml(p.group_key)}" rows="3" placeholder="Что и как писать в это поле — например: перечисли обращения в мед. учреждения в хронологическом порядке с датами и результатами каждого обращения">${escapeHtml(p.prompt_text || '')}</textarea>
         </div>
-        <button class="btn-primary btn-sm" onclick="saveAiFieldRecipe('${escapeHtml(r.group_key)}')">Сохранить рецепт</button>
+        <button class="btn-primary btn-sm" onclick="saveAiFieldPrompt('${escapeHtml(p.group_key)}')">Сохранить промпт</button>
       </div>`).join('');
   } catch (err){
     listBox.innerHTML = '';
-    errBox.textContent = 'Не удалось загрузить рецепты: ' + err.message;
+    errBox.textContent = 'Не удалось загрузить промпты: ' + err.message;
     errBox.style.display = 'block';
   }
 }
 
-async function saveAiFieldRecipe(groupKey){
-  const errBox = document.getElementById('aiRecipesError');
+async function saveAiFieldPrompt(groupKey){
+  const errBox = document.getElementById('aiPromptsError');
   errBox.style.display = 'none';
-  const text = document.getElementById(`recipeText_${groupKey}`).value.trim();
+  const text = document.getElementById(`promptText_${groupKey}`).value.trim();
   if (!text){
-    errBox.textContent = 'Инструкция не может быть пустой';
+    errBox.textContent = 'Промпт не может быть пустым';
     errBox.style.display = 'block';
     return;
   }
   try {
-    await api(`/admin/ai-field-recipes/${groupKey}`, {
+    await api(`/admin/ai-field-prompts/${groupKey}`, {
       method: 'PATCH',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ instructions: text })
+      body: JSON.stringify({ prompt_text: text })
     });
-    toast('Рецепт сохранён');
-    loadAiFieldRecipes();
+    toast('Промпт сохранён');
+    loadAiFieldPrompts();
   } catch (err){
-    errBox.textContent = 'Не удалось сохранить рецепт: ' + err.message;
+    errBox.textContent = 'Не удалось сохранить промпт: ' + err.message;
     errBox.style.display = 'block';
   }
 }
@@ -1627,7 +1594,7 @@ async function loadAiRequestsLog(){
       body.innerHTML = '<tr><td colspan="7" style="color:var(--muted);">Пока нет ни одного обращения к ИИ</td></tr>';
       return;
     }
-    const typeLabels = { extract_fields: 'Простые поля', draft_facts: 'Сбор фактов', draft_narrative: 'Составные поля' };
+    const typeLabels = { analyze: 'Разбор + факты', draft_narrative: 'Составление текста' };
     body.innerHTML = rows.map(r => `
       <tr>
         <td style="white-space:nowrap;">${new Date(r.created_at).toLocaleString('ru-RU')}</td>
@@ -1645,69 +1612,7 @@ async function loadAiRequestsLog(){
   }
 }
 
-// ---------- сканы документов дела (этап 4) ----------
-
-const ATTACHMENT_ICONS = { 'application/pdf': '📄', 'image/jpeg': '🖼', 'image/png': '🖼', 'image/webp': '🖼' };
-
-async function loadCaseAttachments(){
-  if (!currentCase) return;
-  try {
-    const list = await api(`/cases/${currentCase.id}/attachments`);
-    renderCaseAttachments(list);
-  } catch (err){
-    document.getElementById('caseAttachmentsList').innerHTML =
-      `<div style="color:var(--wine);font-size:12px;">Не удалось загрузить список сканов: ${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function renderCaseAttachments(list){
-  const box = document.getElementById('caseAttachmentsList');
-  if (!list.length){
-    box.innerHTML = '<div style="color:var(--muted);font-size:12px;">Сканы пока не загружены</div>';
-    return;
-  }
-  box.innerHTML = list.map(a => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft);">
-      <span style="font-size:12.5px;">${ATTACHMENT_ICONS[a.content_type] || '📎'} ${escapeHtml(a.original_filename)}</span>
-      <button class="icon-btn danger" title="Удалить" onclick="deleteCaseAttachment('${a.id}')">🗑</button>
-    </div>`).join('');
-}
-
-async function uploadCaseAttachments(fileList){
-  if (!currentCase || !fileList || !fileList.length) return;
-  const errBox = document.getElementById('caseAttachmentsError');
-  errBox.style.display = 'none';
-
-  const formData = new FormData();
-  for (const file of fileList) formData.append('files', file);
-
-  try {
-    await api(`/cases/${currentCase.id}/attachments`, { method: 'POST', body: formData });
-    await loadCaseAttachments();
-    toast('Сканы загружены');
-  } catch (err){
-    errBox.textContent = 'Не удалось загрузить файлы: ' + err.message;
-    errBox.style.display = 'block';
-  } finally {
-    document.getElementById('caseAttachmentInput').value = ''; // чтобы можно было выбрать те же файлы повторно при ошибке
-  }
-}
-
-async function deleteCaseAttachment(attachmentId){
-  if (!currentCase) return;
-  const ok = window.confirm('Удалить этот скан? Файл будет удалён с сервера безвозвратно.');
-  if (!ok) return;
-  try {
-    await api(`/cases/${currentCase.id}/attachments/${attachmentId}`, { method: 'DELETE' });
-    await loadCaseAttachments();
-  } catch (err){
-    const errBox = document.getElementById('caseAttachmentsError');
-    errBox.textContent = 'Не удалось удалить скан: ' + err.message;
-    errBox.style.display = 'block';
-  }
-}
-
-// ---------- фабула дела + ИИ-разбор простых полей (этап 1) ----------
+// ---------- фабула дела + ИИ (кнопка 1: разбор + факты, кнопка 2: составление текста) ----------
 
 function scheduleSaveNarrative(){
   clearTimeout(narrativeSaveTimer);
@@ -1730,22 +1635,45 @@ async function saveNarrative(){
   }
 }
 
-function updateAiExtractHint(){
+function updateAiButtonsState(){
   const hint = document.getElementById('aiExtractHint');
-  const btn = document.getElementById('aiExtractBtn');
+  const analyzeBtn = document.getElementById('aiExtractBtn');
   const draftBtn = document.getElementById('aiDraftBtn');
-  if (!currentCaseSelectedTemplates.size){
-    hint.textContent = 'Сначала выберите документы слева — по ним ИИ поймёт, какие поля искать';
-    btn.disabled = true;
-    draftBtn.disabled = true;
-  } else {
-    hint.textContent = '';
-    btn.disabled = false;
-    draftBtn.disabled = false;
-  }
+  const hasTemplates = currentCaseSelectedTemplates.size > 0;
+  const hasFacts = !!(currentCase && currentCase.ai_facts && currentCase.ai_facts.length);
+
+  analyzeBtn.disabled = !hasTemplates;
+  hint.textContent = hasTemplates ? '' : 'Сначала выберите документы слева — по ним ИИ поймёт, какие поля искать';
+
+  draftBtn.disabled = !hasTemplates || !hasFacts;
+  draftBtn.title = !hasTemplates
+    ? 'Сначала выберите документы дела'
+    : (!hasFacts ? 'Сначала нажмите «Разобрать дело через ИИ» — фактов для составления текста ещё нет' : '');
 }
 
-async function runAiExtractFields(){
+function renderAiFactsPanel(facts){
+  const factsPanel = document.getElementById('aiFactsPanel');
+  const factsList = document.getElementById('aiFactsListBox');
+  if (!facts || !facts.length){
+    factsPanel.style.display = 'none';
+    return;
+  }
+  document.getElementById('aiFactsCount').textContent = facts.length;
+  factsList.innerHTML = facts.map(f =>
+    `<li>${f.date ? `<strong>[${escapeHtml(f.date)}]</strong> ` : '<span style="color:var(--muted);">[дата не указана]</span> '}${escapeHtml(f.event)}</li>`
+  ).join('');
+  factsPanel.style.display = 'block';
+}
+
+function toggleAiFactsPanel(){
+  const list = document.getElementById('aiFactsListBox');
+  const icon = document.getElementById('aiFactsToggleIcon');
+  const isHidden = list.style.display === 'none';
+  list.style.display = isHidden ? 'block' : 'none';
+  icon.textContent = isHidden ? '▴' : '▾';
+}
+
+async function runAiAnalyze(){
   if (!currentCase) return;
   const errBox = document.getElementById('aiExtractError');
   errBox.style.display = 'none';
@@ -1768,9 +1696,10 @@ async function runAiExtractFields(){
   btn.textContent = 'Разбираю…';
 
   try {
-    // Разбор одновременно сохраняет текст фабулы на сервере — не нужно
-    // дожидаться отдельного debounce-автосохранения перед запуском.
-    const result = await api(`/cases/${currentCase.id}/ai/extract-fields`, {
+    // Один запрос решает две задачи разом (простые поля + факты для
+    // хронологии) — текст фабулы и сканы отправляются один раз, а не
+    // дважды, как было бы при двух отдельных запросах.
+    const result = await api(`/cases/${currentCase.id}/ai/analyze`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
@@ -1780,21 +1709,24 @@ async function runAiExtractFields(){
     });
 
     aiExtractionMeta = {};
-    (result.results || []).forEach(r => { aiExtractionMeta[r.field_key] = r; });
+    (result.fields || []).forEach(r => { aiExtractionMeta[r.field_key] = r; });
 
-    // Перечитываем дело с сервера — там уже актуальные значения полей и
-    // флаги is_ai_generated/is_confirmed_by_user после разбора.
+    // Перечитываем дело с сервера — там уже актуальные значения полей,
+    // флаги is_ai_generated/is_confirmed_by_user и сохранённый список
+    // фактов (ai_facts) после разбора.
     currentCase = await api(`/cases/${currentCase.id}`);
     const available = currentAvailableTemplates();
     await renderCaseFieldsForm(available);
     updateDocTabCompletionDots();
     refreshPreview();
     markCaseHasPendingChanges();
+    renderAiFactsPanel(currentCase.ai_facts);
+    updateAiButtonsState();
 
-    const applied = (result.results || []).filter(r => r.applied).length;
-    const confirmedSkipped = (result.results || []).filter(r => r.skipped_reason === 'confirmed_by_user').length;
-    const notFound = (result.results || []).filter(r => r.skipped_reason === 'empty').length;
-    let msg = `ИИ заполнил полей: ${applied}`;
+    const applied = (result.fields || []).filter(r => r.applied).length;
+    const confirmedSkipped = (result.fields || []).filter(r => r.skipped_reason === 'confirmed_by_user').length;
+    const notFound = (result.fields || []).filter(r => r.skipped_reason === 'empty').length;
+    let msg = `ИИ заполнил полей: ${applied}, собрал фактов: ${(result.facts || []).length}`;
     if (notFound) msg += `, не найдено: ${notFound}`;
     if (confirmedSkipped) msg += `, пропущено (уже подтверждено вами): ${confirmedSkipped}`;
     if (result.attachments_used) msg += `. Учтено сканов: ${result.attachments_used}`;
@@ -1805,16 +1737,8 @@ async function runAiExtractFields(){
   } finally {
     btn.disabled = false;
     btn.textContent = originalLabel;
-    updateAiExtractHint();
+    updateAiButtonsState();
   }
-}
-
-function toggleAiFactsPanel(){
-  const list = document.getElementById('aiFactsListBox');
-  const icon = document.getElementById('aiFactsToggleIcon');
-  const isHidden = list.style.display === 'none';
-  list.style.display = isHidden ? 'block' : 'none';
-  icon.textContent = isHidden ? '▴' : '▾';
 }
 
 async function runAiDraftFields(){
@@ -1822,9 +1746,8 @@ async function runAiDraftFields(){
   const errBox = document.getElementById('aiExtractError');
   errBox.style.display = 'none';
 
-  const narrative = document.getElementById('caseNarrativeText').value.trim();
-  if (!narrative){
-    errBox.textContent = 'Вставьте текст фабулы перед сбором составных полей';
+  if (!currentCase.ai_facts || !currentCase.ai_facts.length){
+    errBox.textContent = 'Сначала нажмите «Разобрать дело через ИИ»';
     errBox.style.display = 'block';
     return;
   }
@@ -1840,25 +1763,13 @@ async function runAiDraftFields(){
   btn.textContent = 'Собираю…';
 
   try {
+    // Запрос работает только со списком фактов, уже сохранённым в деле —
+    // ни текст фабулы, ни сканы повторно не отправляются.
     const result = await api(`/cases/${currentCase.id}/ai/draft-fields`, {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({
-        raw_narrative: narrative,
-        template_ids: Array.from(currentCaseSelectedTemplates),
-      })
+      body: JSON.stringify({ template_ids: Array.from(currentCaseSelectedTemplates) })
     });
-
-    // Показываем панель с фактами — это и есть проверяемость для составных
-    // полей: юрист может свериться с фабулой, что ничего не упущено и не
-    // придумано, прежде чем доверять собранному тексту.
-    const factsPanel = document.getElementById('aiFactsPanel');
-    const factsList = document.getElementById('aiFactsListBox');
-    document.getElementById('aiFactsCount').textContent = (result.facts || []).length;
-    factsList.innerHTML = (result.facts || []).map(f =>
-      `<li>${f.date ? `<strong>[${escapeHtml(f.date)}]</strong> ` : '<span style="color:var(--muted);">[дата не указана]</span> '}${escapeHtml(f.event)}</li>`
-    ).join('');
-    factsPanel.style.display = 'block';
 
     currentCase = await api(`/cases/${currentCase.id}`);
     const available = currentAvailableTemplates();
@@ -1869,19 +1780,18 @@ async function runAiDraftFields(){
 
     const applied = (result.results || []).filter(r => r.applied).length;
     const confirmedSkipped = (result.results || []).filter(r => r.skipped_reason === 'confirmed_by_user').length;
-    const usedGeneric = (result.results || []).filter(r => r.used_generic_recipe && r.applied).length;
+    const usedGeneric = (result.results || []).filter(r => r.used_generic_prompt && r.applied).length;
     let msg = `ИИ собрал полей: ${applied}`;
     if (confirmedSkipped) msg += `, пропущено (уже подтверждено вами): ${confirmedSkipped}`;
-    if (usedGeneric) msg += `. Для ${usedGeneric} из них ещё не настроен точный рецепт — см. «Рецепты ИИ» в админке`;
-    if (result.attachments_used) msg += `. Учтено сканов: ${result.attachments_used}`;
+    if (usedGeneric) msg += `. Для ${usedGeneric} из них ещё не настроен точный промпт — см. «Промпты полей» в админке`;
     toast(msg);
   } catch (err){
-    errBox.textContent = 'Ошибка сбора составных полей: ' + err.message;
+    errBox.textContent = 'Ошибка составления текста: ' + err.message;
     errBox.style.display = 'block';
   } finally {
     btn.disabled = false;
     btn.textContent = originalLabel;
-    updateAiExtractHint();
+    updateAiButtonsState();
   }
 }
 

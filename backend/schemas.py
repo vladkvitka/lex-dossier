@@ -183,6 +183,11 @@ class CaseDocumentOut(BaseModel):
         from_attributes = True
 
 
+class FactItemOut(BaseModel):
+    date: Optional[str] = None
+    event: str
+
+
 class CaseDetailOut(CaseOut):
     fields: List[CaseFieldValueOut] = []
     documents: List[CaseDocumentOut] = []
@@ -191,6 +196,12 @@ class CaseDetailOut(CaseOut):
     # тут уже стоит нужный конкретный template_id, а не оба варианта сразу.
     package_template_ids: List[UUID] = []
     raw_narrative: Optional[str] = None
+    # Факты, собранные ИИ на шаге "Разобрать дело через ИИ" (см. Case.ai_facts
+    # в models.py) — отдаются вместе с делом, чтобы при повторном открытии
+    # карточки панель "Факты, найденные ИИ" сразу показывала то, что уже
+    # было собрано, без повторного запроса. Пустой список — кнопка "Собрать
+    # обстоятельства дела" на фронте остаётся неактивной.
+    ai_facts: List[FactItemOut] = []
 
 
 class GenerateRequest(BaseModel):
@@ -243,9 +254,9 @@ class CaseDocumentEditRequest(BaseModel):
     selected_template_ids: List[UUID] = []
 
 
-# ---------- ИИ-разбор фабулы (этап 1: только текст, только простые поля) ----------
+# ---------- ИИ-разбор дела (кнопка 1: простые поля + сбор фактов одним запросом) ----------
 
-class ExtractFieldsRequest(BaseModel):
+class AnalyzeCaseRequest(BaseModel):
     # Если не передан — берётся уже сохранённый case.raw_narrative. Если
     # передан — им же обновляется case.raw_narrative (разбор одновременно
     # сохраняет текст, чтобы юрист не терял его при случайном обновлении
@@ -267,13 +278,14 @@ class ExtractedFieldResult(BaseModel):
     skipped_reason: Optional[str] = None  # 'confirmed_by_user' | 'empty' | None
 
 
-class ExtractFieldsResponse(BaseModel):
-    results: List[ExtractedFieldResult] = []
+class AnalyzeCaseResponse(BaseModel):
+    fields: List[ExtractedFieldResult] = []
+    facts: List[FactItemOut] = []
     model_used: str
     attachments_used: int = 0
 
 
-# ---------- Настройка ИИ-модели (админ) ----------
+# ---------- Настройка ИИ-моделей (админ) — отдельно для разбора и для составления текста ----------
 
 class AiModelInfo(BaseModel):
     slug: str                    # идентификатор модели в OpenRouter, напр. "anthropic/claude-haiku-4.5"
@@ -281,17 +293,24 @@ class AiModelInfo(BaseModel):
     label: str                   # человекочитаемое имя для интерфейса
     price_in_per_million: float  # $ за 1 млн входных токенов
     price_out_per_million: float # $ за 1 млн выходных токенов
-    estimated_cost_per_call: float  # расчётная стоимость ОДНОГО обращения к /ai/extract-fields при типичном объёме фабулы
+    estimated_cost_per_call: float  # расчётная стоимость ОДНОГО обращения при типичном объёме фабулы
     note: Optional[str] = None
     is_current: bool = False
 
 
-class AiSettingsOut(BaseModel):
+class AiPurposeSettingsOut(BaseModel):
+    purpose: str        # 'analyze' | 'draft'
+    purpose_label: str  # человекочитаемое название назначения — для интерфейса
     current_model: str
     models: List[AiModelInfo]
 
 
+class AiSettingsOut(BaseModel):
+    purposes: List[AiPurposeSettingsOut]
+
+
 class AiSettingsUpdate(BaseModel):
+    purpose: str  # 'analyze' | 'draft'
     model: str
 
 
@@ -314,32 +333,29 @@ class AiRequestLogOut(BaseModel):
         from_attributes = True
 
 
-# ---------- Рецепты составных полей (админ, этап 3) ----------
+# ---------- Промпты составных полей (админ, этап 3) ----------
 
-class AIFieldRecipeOut(BaseModel):
+class AIFieldPromptOut(BaseModel):
     group_key: str
     label: str
-    instructions: Optional[str] = None  # None — рецепт ещё не задан, будет использован общий запасной вариант
-    has_recipe: bool = False
+    prompt_text: Optional[str] = None  # None — промпт ещё не задан, будет использован общий запасной вариант
+    has_prompt: bool = False
 
     class Config:
         from_attributes = True
 
 
-class AIFieldRecipeUpdate(BaseModel):
-    instructions: str
+class AIFieldPromptUpdate(BaseModel):
+    prompt_text: str
 
 
-# ---------- ИИ-черновик составных полей (этап 3: хронология, обстоятельства и т.п.) ----------
+# ---------- ИИ-составление текста составных полей (кнопка 2: хронология, обстоятельства и т.п.) ----------
+# Работает ТОЛЬКО со списком фактов, уже сохранённым в деле кнопкой 1 (см.
+# Case.ai_facts) — поэтому в запросе нет ни текста фабулы, ни сканов: они
+# сюда просто не нужны, вся нужная информация уже извлечена на первом шаге.
 
 class DraftFieldsRequest(BaseModel):
-    raw_narrative: Optional[str] = None
     template_ids: List[UUID]
-
-
-class FactItemOut(BaseModel):
-    date: Optional[str] = None
-    event: str
 
 
 class DraftedFieldResult(BaseModel):
@@ -348,14 +364,12 @@ class DraftedFieldResult(BaseModel):
     draft: str
     applied: bool
     skipped_reason: Optional[str] = None  # 'confirmed_by_user' | 'empty' | None
-    used_generic_recipe: bool = False  # True — для этого поля ещё не настроен рецепт админом
+    used_generic_prompt: bool = False  # True — для этого поля ещё не настроен персональный промпт админом
 
 
 class DraftFieldsResponse(BaseModel):
     results: List[DraftedFieldResult] = []
-    facts: List[FactItemOut] = []  # собранные факты — для прозрачности, можно показать юристу отдельно
     model_used: str
-    attachments_used: int = 0
 
 
 # ---------- Сканы документов дела (этап 4) ----------

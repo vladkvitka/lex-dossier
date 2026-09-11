@@ -1076,6 +1076,7 @@ let narrativeSaveTimer = null;    // debounce автосохранения те�
 // при этом остаётся (он строится из is_ai_generated, который persist-ится),
 // просто подсказка-цитата будет не видна до следующего разбора.
 let aiExtractionMeta = {};
+let currentCaseAttachmentsCount = 0; // обновляется в renderCaseAttachments — нужен для валидации кнопки "Разобрать дело через ИИ" (текст фабулы не обязателен, если есть сканы)
 let currentCaseSelectedTemplates = new Set(); // выбранные для дела шаблоны (id)
 let templateGroupKeysByTemplateId = {}; // template_id -> [groupKey, ...] — для красных/зелёных индикаторов во вкладках
 
@@ -1294,6 +1295,7 @@ async function openCase(caseId){
     document.getElementById('caseNarrativeText').value = currentCase.raw_narrative || '';
     document.getElementById('aiExtractError').style.display = 'none';
     aiExtractionMeta = {};
+    currentCaseAttachmentsCount = 0;
     renderAiFactsPanel(currentCase.ai_facts || []);
     loadCaseAttachments();
 
@@ -1481,6 +1483,7 @@ function renderAiSettings(data){
   const container = document.getElementById('aiSettingsTables');
   container.innerHTML = data.purposes.map(p => `
     <h2 style="font-size:14.5px;margin:22px 0 10px;">${escapeHtml(p.purpose_label)}</h2>
+    ${p.purpose === 'analyze' ? '<div style="color:var(--muted);font-size:12px;margin-bottom:8px;">Если в делах есть приложенные сканы, выбирайте модель с поддержкой сканов — иначе разбор дел со сканами будет падать с ошибкой.</div>' : ''}
     <div class="table-wrap">
       <table>
         <thead>
@@ -1490,6 +1493,7 @@ function renderAiSettings(data){
             <th>Провайдер</th>
             <th>Цена вход / выход ($ за 1 млн токенов)</th>
             <th>≈ Стоимость 1 запроса</th>
+            <th>Сканы</th>
             <th>Заметка</th>
           </tr>
         </thead>
@@ -1501,6 +1505,7 @@ function renderAiSettings(data){
               <td>${escapeHtml(m.provider)}</td>
               <td>$${m.price_in_per_million.toFixed(2)} / $${m.price_out_per_million.toFixed(2)}</td>
               <td>≈ $${m.estimated_cost_per_call.toFixed(4)}</td>
+              <td>${m.supports_images ? '<span class="badge badge-ready">умеет</span>' : '<span class="badge badge-draft">нет</span>'}</td>
               <td style="color:var(--muted);font-size:12.5px;">${m.note ? escapeHtml(m.note) : ''}</td>
             </tr>`).join('')}
         </tbody>
@@ -1628,6 +1633,7 @@ async function loadCaseAttachments(){
 }
 
 function renderCaseAttachments(list){
+  currentCaseAttachmentsCount = list.length;
   const box = document.getElementById('caseAttachmentsList');
   if (!list.length){
     box.innerHTML = '<div style="color:var(--muted);font-size:12px;">Сканы пока не загружены</div>';
@@ -1741,8 +1747,8 @@ async function runAiAnalyze(){
   errBox.style.display = 'none';
 
   const narrative = document.getElementById('caseNarrativeText').value.trim();
-  if (!narrative){
-    errBox.textContent = 'Вставьте текст фабулы перед разбором';
+  if (!narrative && !currentCaseAttachmentsCount){
+    errBox.textContent = 'Вставьте текст фабулы или приложите хотя бы один скан перед разбором';
     errBox.style.display = 'block';
     return;
   }

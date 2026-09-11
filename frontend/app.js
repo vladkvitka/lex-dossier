@@ -1612,6 +1612,68 @@ async function loadAiRequestsLog(){
   }
 }
 
+// ---------- сканы документов дела ----------
+
+const ATTACHMENT_ICONS = { 'application/pdf': '📄', 'image/jpeg': '🖼', 'image/png': '🖼', 'image/webp': '🖼' };
+
+async function loadCaseAttachments(){
+  if (!currentCase) return;
+  try {
+    const list = await api(`/cases/${currentCase.id}/attachments`);
+    renderCaseAttachments(list);
+  } catch (err){
+    document.getElementById('caseAttachmentsList').innerHTML =
+      `<div style="color:var(--wine);font-size:12px;">Не удалось загрузить список сканов: ${escapeHtml(err.message)}</div>`;
+  }
+}
+
+function renderCaseAttachments(list){
+  const box = document.getElementById('caseAttachmentsList');
+  if (!list.length){
+    box.innerHTML = '<div style="color:var(--muted);font-size:12px;">Сканы пока не загружены</div>';
+    return;
+  }
+  box.innerHTML = list.map(a => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft);">
+      <span style="font-size:12.5px;">${ATTACHMENT_ICONS[a.content_type] || '📎'} ${escapeHtml(a.original_filename)}</span>
+      <button class="icon-btn danger" title="Удалить" onclick="deleteCaseAttachment('${a.id}')">🗑</button>
+    </div>`).join('');
+}
+
+async function uploadCaseAttachments(fileList){
+  if (!currentCase || !fileList || !fileList.length) return;
+  const errBox = document.getElementById('caseAttachmentsError');
+  errBox.style.display = 'none';
+
+  const formData = new FormData();
+  for (const file of fileList) formData.append('files', file);
+
+  try {
+    await api(`/cases/${currentCase.id}/attachments`, { method: 'POST', body: formData });
+    await loadCaseAttachments();
+    toast('Сканы загружены');
+  } catch (err){
+    errBox.textContent = 'Не удалось загрузить файлы: ' + err.message;
+    errBox.style.display = 'block';
+  } finally {
+    document.getElementById('caseAttachmentInput').value = ''; // чтобы можно было выбрать те же файлы повторно при ошибке
+  }
+}
+
+async function deleteCaseAttachment(attachmentId){
+  if (!currentCase) return;
+  const ok = window.confirm('Удалить этот скан? Файл будет удалён с сервера безвозвратно.');
+  if (!ok) return;
+  try {
+    await api(`/cases/${currentCase.id}/attachments/${attachmentId}`, { method: 'DELETE' });
+    await loadCaseAttachments();
+  } catch (err){
+    const errBox = document.getElementById('caseAttachmentsError');
+    errBox.textContent = 'Не удалось удалить скан: ' + err.message;
+    errBox.style.display = 'block';
+  }
+}
+
 // ---------- фабула дела + ИИ (кнопка 1: разбор + факты, кнопка 2: составление текста) ----------
 
 function scheduleSaveNarrative(){
@@ -1792,6 +1854,58 @@ async function runAiDraftFields(){
     btn.disabled = false;
     btn.textContent = originalLabel;
     updateAiButtonsState();
+  }
+}
+
+function caseFieldInputHtml(f, groupKey, value){
+  // Тип поля ограничивает, что можно ввести — например, в "дату" больше
+  // нельзя напечатать буквы: браузер сам не даст ввести некорректный формат.
+  const key = escapeHtml(groupKey);
+  const val = escapeHtml(value);
+  if (f.field_type === 'textarea'){
+    return `<textarea rows="3" data-field-key="${key}" oninput="scheduleRefreshPreview()">${val}</textarea>`;
+  }
+  if (f.field_type === 'date'){
+    // value дела хранится как ISO (yyyy-mm-dd) — так его понимает нативный
+    // date-picker. Но на случай, если в базе всё же осталось значение в
+    // привычном ДД.ММ.ГГГГ (например, из старой записи до исправления
+    // формата в промпте ИИ) — распознаём и такой вид тоже, а не просто
+    // показываем пустое поле там, где данные на самом деле есть.
+    const isoMatch = /^\d{4}-\d{2}-\d{2}$/.test(value);
+    const ruMatch = value.match(/^(\d{1,2})[.\-\/](\d{1,2})[.\-\/](\d{4})$/);
+    let isoVal = '';
+    if (isoMatch) isoVal = value;
+    else if (ruMatch) isoVal = `${ruMatch[3]}-${ruMatch[2].padStart(2,'0')}-${ruMatch[1].padStart(2,'0')}`;
+    return `<input type="date" data-field-key="${key}" value="${isoVal}" oninput="scheduleRefreshPreview()">`;
+  }
+  if (f.field_type === 'number' || f.field_type === 'money'){
+    return `<input type="number" step="any" inputmode="decimal" data-field-key="${key}" value="${val}" oninput="scheduleRefreshPreview()">`;
+  }
+  return `<input type="text" data-field-key="${key}" value="${val}" oninput="scheduleRefreshPreview()">`;
+}
+
+async function saveCaseFields(opts = {}){
+  const inputs = document.querySelectorAll('#caseFieldsBox [data-field-key]');
+  const values = {};
+  inputs.forEach(el => { values[el.getAttribute('data-field-key')] = el.value; });
+
+  const errBox = document.getElementById('caseFormError');
+  errBox.style.display = 'none';
+  try {
+    currentCase = await api(`/cases/${currentCase.id}/fields`, {
+      method: 'PUT',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(values)
+    });
+    if (!opts.silent) toast('Данные сохранены');
+  } catch (err){
+    // Автосохранение молча повторит попытку при следующем вводе — не
+    // показываем тост на каждую неудачу фонового сохранения, только для
+    // явного вызова (например, перед генерацией).
+    if (!opts.silent){
+      errBox.textContent = 'Ошибка сохранения: ' + err.message;
+      errBox.style.display = 'block';
+    }
   }
 }
 

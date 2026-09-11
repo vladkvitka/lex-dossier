@@ -65,7 +65,7 @@
         <button class="nav-item" data-nav="admin-templates" onclick="switchNav('admin-templates', this)">Шаблоны</button>
         <button class="nav-item" data-nav="admin-packages" onclick="switchNav('admin-packages', this)">Пакеты</button>
         <button class="nav-item" data-nav="admin-ai-settings" onclick="switchNav('admin-ai-settings', this); loadAiSettings();">Настройки ИИ</button>
-        <button class="nav-item" data-nav="admin-ai-recipes" onclick="switchNav('admin-ai-recipes', this); loadAiFieldRecipes();">Рецепты ИИ</button>
+        <button class="nav-item" data-nav="admin-ai-prompts" onclick="switchNav('admin-ai-prompts', this); loadAiFieldPrompts();">Промпты полей</button>
         <button class="nav-item" data-nav="admin-ai-log" onclick="switchNav('admin-ai-log', this); loadAiRequestsLog();">Лог ИИ-запросов</button>
       </div>
     </div>
@@ -187,14 +187,14 @@
                     oninput="scheduleSaveNarrative()"></textarea>
                 </div>
                 <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                  <button class="btn-primary btn-sm" id="aiExtractBtn" onclick="runAiExtractFields()">✨ Разобрать простые поля</button>
-                  <button class="btn btn-sm" id="aiDraftBtn" onclick="runAiDraftFields()">📝 Собрать хронологию/обстоятельства</button>
+                  <button class="btn-primary btn-sm" id="aiExtractBtn" onclick="runAiAnalyze()">✨ Разобрать дело через ИИ</button>
+                  <button class="btn btn-sm" id="aiDraftBtn" onclick="runAiDraftFields()">📝 Собрать обстоятельства дела</button>
                   <span id="aiExtractHint" style="color:var(--muted);font-size:12px;"></span>
                 </div>
                 <div class="login-error" id="aiExtractError" style="margin-top:10px;"></div>
                 <div id="aiFactsPanel" style="display:none;margin-top:14px;padding:12px 14px;background:var(--surface-alt);border:1px solid var(--border);border-radius:var(--radius-s);">
                   <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" onclick="toggleAiFactsPanel()">
-                    <strong style="font-size:12.5px;">Факты, найденные ИИ в тексте (<span id="aiFactsCount">0</span>) — сверьте с фабулой</strong>
+                    <strong style="font-size:12.5px;">Факты, найденные ИИ (<span id="aiFactsCount">0</span>) — сверьте с источниками</strong>
                     <span id="aiFactsToggleIcon">▾</span>
                   </div>
                   <ul id="aiFactsListBox" style="margin:10px 0 0;padding-left:18px;font-size:12.5px;color:var(--ink-soft);display:none;"></ul>
@@ -426,35 +426,21 @@
       <!-- ===== АДМИН: НАСТРОЙКИ ИИ ===== -->
       <div class="screen" id="screen-admin-ai-settings">
         <h1 class="page-title">Настройки ИИ</h1>
-        <p class="page-sub">Модель, которая используется для ИИ-разбора фабулы дела (кнопка «Разобрать через ИИ» в карточке дела). Цены — ориентировочные, актуальны на момент добавления модели в список; для точных расходов сверяйтесь с openrouter.ai/models.</p>
+        <p class="page-sub">Модели используются раздельно для двух разных по сложности задач: разбор простых полей и сбор фактов (кнопка «Разобрать дело через ИИ») — задача проще, и составление связного текста по этим фактам (кнопка «Собрать обстоятельства дела») — задача сложнее, дешёвая модель здесь может ошибаться чаще. Цены — ориентировочные, актуальны на момент добавления модели в список; для точных расходов сверяйтесь с openrouter.ai/models.</p>
 
         <div class="notice" id="aiSettingsCurrentNotice">Загрузка…</div>
 
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th></th>
-                <th>Модель</th>
-                <th>Провайдер</th>
-                <th>Цена вход / выход ($ за 1 млн токенов)</th>
-                <th>≈ Стоимость 1 разбора фабулы</th>
-                <th>Заметка</th>
-              </tr>
-            </thead>
-            <tbody id="aiSettingsBody"></tbody>
-          </table>
-        </div>
+        <div id="aiSettingsTables"></div>
         <div class="login-error" id="aiSettingsError" style="margin-top:12px;"></div>
       </div>
 
-      <!-- ===== АДМИН: РЕЦЕПТЫ ИИ (составные поля) ===== -->
-      <div class="screen" id="screen-admin-ai-recipes">
-        <h1 class="page-title">Рецепты ИИ для составных полей</h1>
-        <p class="page-sub">Инструкция для ИИ, что и как писать в конкретное составное поле (хронология обращений, обстоятельства получения травмы и т.п.). Пока рецепт не задан — используется общая запасная инструкция, функция всё равно работает, просто менее прицельно.</p>
+      <!-- ===== АДМИН: ПРОМПТЫ ИИ (составные поля) ===== -->
+      <div class="screen" id="screen-admin-ai-prompts">
+        <h1 class="page-title">Промпты полей для ИИ</h1>
+        <p class="page-sub">Инструкция для ИИ, что и как писать в конкретное составное поле (хронология обращений, обстоятельства получения травмы и т.п.). Пока промпт не задан — используется общий запасной вариант, функция всё равно работает, просто менее прицельно.</p>
 
-        <div id="aiRecipesList"></div>
-        <div class="login-error" id="aiRecipesError" style="margin-top:12px;"></div>
+        <div id="aiPromptsList"></div>
+        <div class="login-error" id="aiPromptsError" style="margin-top:12px;"></div>
       </div>
 
       <!-- ===== АДМИН: ЛОГ ИИ-ЗАПРОСОВ ===== -->
@@ -487,6 +473,6 @@
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=22"></script>
+<script src="app.js?v=23"></script>
 </body>
 </html>

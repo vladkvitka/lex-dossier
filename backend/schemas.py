@@ -294,6 +294,7 @@ class AiModelInfo(BaseModel):
     price_in_per_million: float  # $ за 1 млн входных токенов
     price_out_per_million: float # $ за 1 млн выходных токенов
     estimated_cost_per_call: float  # расчётная стоимость ОДНОГО обращения при типичном объёме фабулы
+    supports_images: bool = True  # умеет ли модель принимать сканы (важно для назначения "analyze")
     note: Optional[str] = None
     is_current: bool = False
 

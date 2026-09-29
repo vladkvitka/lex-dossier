@@ -315,6 +315,34 @@ class AiSettingsUpdate(BaseModel):
     model: str
 
 
+# ---------- Прокси для запросов к ИИ (админ) ----------
+
+class AiProxyOut(BaseModel):
+    enabled: bool                       # используется ли сейчас прокси вообще
+    proxy_url_masked: Optional[str] = None  # адрес с закрытым паролем (login:***@host:port) — пароль наружу не отдаётся
+    source: str                         # 'admin' — задан в админке | 'env' — из .env (запасной вариант) | 'none' — не используется
+
+
+class AiProxyUpdate(BaseModel):
+    # Полный адрес прокси, например http://логин:пароль@1.2.3.4:8080.
+    # Пустая строка = отключить прокси (запросы пойдут напрямую).
+    proxy_url: str
+
+
+class AiProxyTestRequest(BaseModel):
+    # Если не указан — проверяется прокси, сохранённый сейчас. Если указан —
+    # проверяется именно этот адрес (можно проверить новый прокси ДО того,
+    # как сохранять его и переключать на него всю работу).
+    proxy_url: Optional[str] = None
+
+
+class AiProxyTestOut(BaseModel):
+    ok: bool
+    status_code: Optional[int] = None
+    elapsed_ms: Optional[int] = None
+    message: str
+
+
 # ---------- Лог ИИ-запросов (админ, этап 2 — прозрачность) ----------
 
 class AiRequestLogOut(BaseModel):

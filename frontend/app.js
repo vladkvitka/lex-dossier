@@ -48,7 +48,12 @@ async function api(path, options={}){
   let body = null;
   try { body = await res.json(); } catch(e) { /* нет тела ответа */ }
   if (!res.ok){
-    const detail = body && body.detail ? JSON.stringify(body.detail) : ('HTTP ' + res.status);
+    // Текстовое сообщение сервера показываем как есть — раньше оно
+    // оборачивалось в лишние кавычки ("..."). Сложные структуры (например,
+    // список ошибок валидации формы) по-прежнему выводятся как JSON.
+    const detail = body && body.detail
+      ? (typeof body.detail === 'string' ? body.detail : JSON.stringify(body.detail))
+      : ('HTTP ' + res.status);
     throw new Error(detail);
   }
   return body;
@@ -1460,6 +1465,7 @@ async function loadAiSettings(){
   const errBox = document.getElementById('aiSettingsError');
   errBox.style.display = 'none';
   notice.textContent = 'Загрузка…';
+  loadAiProxy(); // прокси загружается независимо — сбой одного блока не должен прятать другой
   try {
     const data = await api('/admin/ai-settings');
     renderAiSettings(data);
@@ -1528,6 +1534,113 @@ async function selectAiModel(purpose, slug){
     errBox.textContent = 'Не удалось переключить модель: ' + err.message;
     errBox.style.display = 'block';
     loadAiSettings(); // вернуть переключатель в актуальное состояние
+  }
+}
+
+// ---------- админ: прокси для запросов к ИИ ----------
+
+async function loadAiProxy(){
+  const box = document.getElementById('aiProxyStatus');
+  try {
+    renderAiProxy(await api('/admin/ai-proxy'));
+  } catch (err){
+    box.textContent = 'Не удалось загрузить настройки прокси: ' + err.message;
+  }
+}
+
+function renderAiProxy(p){
+  const box = document.getElementById('aiProxyStatus');
+  const sourceNote = p.source === 'env'
+    ? ' (адрес взят из файла .env на сервере — сохраните его здесь, чтобы управлять им из админки)'
+    : '';
+  box.innerHTML = p.enabled
+    ? `Сейчас запросы к ИИ идут через прокси: <strong>${escapeHtml(p.proxy_url_masked || '')}</strong>${sourceNote}`
+    : 'Сейчас прокси <strong>не используется</strong> — запросы к ИИ идут напрямую.';
+  document.getElementById('aiProxyDisableBtn').disabled = !p.enabled;
+}
+
+function showAiProxyTestResult(ok, message){
+  const box = document.getElementById('aiProxyTestResult');
+  box.style.display = 'block';
+  box.style.background = ok ? 'var(--green-soft)' : 'var(--wine-soft)';
+  box.style.color = ok ? 'var(--green)' : 'var(--wine)';
+  box.textContent = (ok ? '✓ ' : '✗ ') + message;
+}
+
+async function testAiProxy(){
+  const btn = document.getElementById('aiProxyTestBtn');
+  const errBox = document.getElementById('aiProxyError');
+  errBox.style.display = 'none';
+  document.getElementById('aiProxyTestResult').style.display = 'none';
+
+  // Если в поле что-то введено — проверяем именно это (можно убедиться, что
+  // НОВЫЙ прокси работает, до того как переключать на него всю систему).
+  // Если поле пустое — проверяем тот прокси, что сохранён сейчас.
+  const value = document.getElementById('aiProxyInput').value.trim();
+
+  const originalLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Проверяю…';
+  try {
+    const r = await api('/admin/ai-proxy/test', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ proxy_url: value || null })
+    });
+    showAiProxyTestResult(r.ok, r.message);
+  } catch (err){
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalLabel;
+  }
+}
+
+async function saveAiProxy(){
+  const errBox = document.getElementById('aiProxyError');
+  const input = document.getElementById('aiProxyInput');
+  errBox.style.display = 'none';
+  document.getElementById('aiProxyTestResult').style.display = 'none';
+
+  const value = input.value.trim();
+  if (!value){
+    errBox.textContent = 'Введите адрес прокси или нажмите «Отключить прокси»';
+    errBox.style.display = 'block';
+    return;
+  }
+  try {
+    const p = await api('/admin/ai-proxy', {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ proxy_url: value })
+    });
+    input.value = ''; // пароль не должен оставаться на экране после сохранения
+    renderAiProxy(p);
+    toast('Прокси сохранён — действует со следующего запроса к ИИ');
+  } catch (err){
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
+  }
+}
+
+async function disableAiProxy(){
+  const ok = window.confirm('Отключить прокси? Запросы к ИИ пойдут напрямую — если IP сервера заблокирован OpenRouter, они будут завершаться ошибкой 403.');
+  if (!ok) return;
+  const errBox = document.getElementById('aiProxyError');
+  errBox.style.display = 'none';
+  document.getElementById('aiProxyTestResult').style.display = 'none';
+  try {
+    const p = await api('/admin/ai-proxy', {
+      method: 'PATCH',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ proxy_url: '' })
+    });
+    renderAiProxy(p);
+    toast('Прокси отключён');
+  } catch (err){
+    errBox.textContent = err.message;
+    errBox.style.display = 'block';
   }
 }
 

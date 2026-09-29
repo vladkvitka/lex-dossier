@@ -9,6 +9,8 @@ import uuid
 import zipfile
 import io
 import base64
+import time
+from urllib.parse import urlsplit, urlunsplit
 import pymupdf
 from PIL import Image
 from datetime import datetime, timedelta, timezone
@@ -59,6 +61,10 @@ from schemas import (
     AiPurposeSettingsOut,
     AiSettingsOut,
     AiSettingsUpdate,
+    AiProxyOut,
+    AiProxyUpdate,
+    AiProxyTestRequest,
+    AiProxyTestOut,
     AiRequestLogOut,
     AIFieldPromptOut,
     AIFieldPromptUpdate,
@@ -105,11 +111,20 @@ DEFAULT_AI_MODEL = os.environ.get("OPENROUTER_MODEL", "anthropic/claude-haiku-4.
 # сервера заблокирован защитой OpenRouter (WAF/антибот блокирует хостинговые
 # IP независимо от валидности ключа — реальный случай, с которым уже
 # столкнулись на проде). Формат — обычный URL прокси, например:
-#   http://login:pароль@1.2.3.4:8080
-#   socks5://login:пароль@1.2.3.4:1080
-# Если переменная не задана — запросы идут напрямую, как раньше (ничего не
-# ломается для окружений, где прокси не нужен).
-OPENROUTER_PROXY_URL = os.environ.get("OPENROUTER_PROXY_URL")
+#   http://login:password@1.2.3.4:8080
+#   socks5://login:password@1.2.3.4:1080
+#
+# ГЛАВНЫЙ источник настройки — экран "Настройки ИИ" в админке (значение
+# хранится в таблице app_settings, ключ AI_PROXY_SETTING_KEY): прокси
+# временные и их нужно менять, не заходя на сервер. Переменная окружения
+# OPENROUTER_PROXY_URL из .env остаётся только запасным вариантом — она
+# используется, пока в админке настройка ни разу не сохранялась (чтобы
+# после обновления кода ничего не отвалилось у тех, кто уже прописал прокси
+# в .env). Как только админ что-либо сохранит в админке (в том числе
+# пустое значение = "без прокси") — значение из .env больше не учитывается.
+OPENROUTER_PROXY_URL_ENV = os.environ.get("OPENROUTER_PROXY_URL")
+AI_PROXY_SETTING_KEY = "ai_proxy_url"
+ALLOWED_PROXY_SCHEMES = ("http", "https", "socks5", "socks5h")
 
 AI_PURPOSES = {
     "analyze": {"setting_key": "ai_model_analyze", "label": "Разбор простых полей и сбор фактов"},
@@ -191,6 +206,66 @@ def _get_ai_model(db: Session, purpose: str) -> str:
     setting_key = AI_PURPOSES[purpose]["setting_key"]
     setting = db.query(models.AppSetting).filter(models.AppSetting.key == setting_key).first()
     return (setting.value if setting and setting.value else None) or DEFAULT_AI_MODEL
+
+
+def _get_ai_proxy(db: Session) -> Tuple[Optional[str], str]:
+    """Возвращает (адрес_прокси_или_None, источник). Источник: 'admin' —
+    задан в админке, 'env' — взят из .env как запасной вариант, 'none' —
+    прокси не используется.
+
+    Если запись в app_settings существует (даже с ПУСТЫМ значением) — она
+    главнее .env: пустое значение в админке означает осознанное "работать
+    без прокси", и .env в этом случае игнорируется. Иначе после нажатия
+    "Отключить прокси" в админке запросы продолжали бы идти через прокси из
+    .env, и админ не понимал бы почему."""
+    setting = db.query(models.AppSetting).filter(models.AppSetting.key == AI_PROXY_SETTING_KEY).first()
+    if setting is not None:
+        value = (setting.value or "").strip()
+        return (value, "admin") if value else (None, "none")
+    if OPENROUTER_PROXY_URL_ENV:
+        return OPENROUTER_PROXY_URL_ENV, "env"
+    return None, "none"
+
+
+def _mask_proxy_url(url: Optional[str]) -> Optional[str]:
+    """Прячет пароль в адресе прокси для показа в интерфейсе: пароль не
+    должен светиться на экране (скриншот, взгляд через плечо) — админу
+    достаточно видеть протокол, логин и адрес. Полный адрес с паролем
+    хранится только в базе и уходит наружу только в самом запросе к прокси."""
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+        if parts.password:
+            netloc = f"{parts.username or ''}:***@{parts.hostname or ''}"
+            if parts.port:
+                netloc += f":{parts.port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
+    except ValueError:
+        pass
+    return url
+
+
+def _validate_proxy_url(url: str) -> str:
+    """Проверяет, что адрес похож на адрес прокси — поймать опечатку сразу
+    при сохранении, а не потом в виде непонятной ошибки при разборе дела.
+    Возвращает очищенный адрес или бросает HTTPException 400."""
+    url = (url or "").strip()
+    try:
+        parts = urlsplit(url)
+        port = parts.port  # заодно проверяет, что порт — число в допустимом диапазоне
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Адрес прокси указан неверно. Пример: http://логин:пароль@1.2.3.4:8080")
+    if parts.scheme not in ALLOWED_PROXY_SCHEMES:
+        raise HTTPException(
+            status_code=400,
+            detail="Адрес должен начинаться с http://, https://, socks5:// или socks5h:// — например: http://логин:пароль@1.2.3.4:8080",
+        )
+    if not parts.hostname:
+        raise HTTPException(status_code=400, detail="В адресе прокси не указан сервер (IP или домен). Пример: http://логин:пароль@1.2.3.4:8080")
+    if port is None:
+        raise HTTPException(status_code=400, detail="В адресе прокси не указан порт. Пример: http://логин:пароль@1.2.3.4:8080")
+    return url
 
 
 # Простые поля — то, что ИИ-разбор заполняет на этом этапе (этап 1). Поля
@@ -1405,7 +1480,13 @@ def _build_synthesis_system_prompt(facts: List[dict], fields: List[dict]) -> str
     )
 
 
-def _call_openrouter_json(system_prompt: str, user_text: str, model: str, images: Optional[List[dict]] = None) -> Tuple[dict, dict]:
+def _call_openrouter_json(
+    system_prompt: str,
+    user_text: str,
+    model: str,
+    images: Optional[List[dict]] = None,
+    proxy_url: Optional[str] = None,
+) -> Tuple[dict, dict]:
     """Дёргает OpenRouter, возвращает (разобранный JSON-ответ, usage-словарь).
     Бросает HTTPException с понятным текстом при любой проблеме — ключ не
     задан, сеть недоступна, модель ответила не-JSON-ом и т.п. Намеренно не
@@ -1442,8 +1523,8 @@ def _call_openrouter_json(system_prompt: str, user_text: str, model: str, images
         # дойти до браузера). Таймаут прокси-сервера нужно поднять отдельно,
         # это вне кода приложения — см. docs/ai-setup.md.
         client_kwargs = {"timeout": 150 if images else 90}
-        if OPENROUTER_PROXY_URL:
-            client_kwargs["proxy"] = OPENROUTER_PROXY_URL
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
         with httpx.Client(**client_kwargs) as client:
             resp = client.post(
                 OPENROUTER_URL,
@@ -1816,7 +1897,8 @@ def analyze_case_with_ai(
     user_text = narrative or "(текст фабулы не предоставлен — используй только приложенные сканы документов)"
 
     try:
-        parsed, usage = _call_openrouter_json(system_prompt, user_text, ai_model, images=images)
+        proxy_url, _proxy_source = _get_ai_proxy(db)
+        parsed, usage = _call_openrouter_json(system_prompt, user_text, ai_model, images=images, proxy_url=proxy_url)
     except HTTPException as e:
         _log_ai_request(
             db, case_id, "analyze", ai_model, {}, None,
@@ -1951,6 +2033,126 @@ def update_ai_settings(
     db.commit()
 
     return get_ai_settings(db=db, current_user=current_user)
+
+
+def _proxy_out(db: Session) -> AiProxyOut:
+    proxy_url, source = _get_ai_proxy(db)
+    return AiProxyOut(enabled=bool(proxy_url), proxy_url_masked=_mask_proxy_url(proxy_url), source=source)
+
+
+@app.get("/api/admin/ai-proxy", response_model=AiProxyOut)
+def get_ai_proxy_settings(
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Текущее состояние прокси для запросов к OpenRouter. Пароль в ответе
+    закрыт (см. _mask_proxy_url) — по этому эндпоинту его получить нельзя."""
+    return _proxy_out(db)
+
+
+@app.patch("/api/admin/ai-proxy", response_model=AiProxyOut)
+def update_ai_proxy_settings(
+    data: AiProxyUpdate,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Сохраняет новый адрес прокси или отключает его (пустая строка).
+    Применяется сразу, со следующего же обращения к ИИ — перезапуск сервера
+    не нужен."""
+    raw = (data.proxy_url or "").strip()
+    new_value = _validate_proxy_url(raw) if raw else ""  # пустое значение — осознанное "без прокси"
+
+    setting = db.query(models.AppSetting).filter(models.AppSetting.key == AI_PROXY_SETTING_KEY).first()
+    if setting:
+        setting.value = new_value
+    else:
+        db.add(models.AppSetting(key=AI_PROXY_SETTING_KEY, value=new_value))
+    db.commit()
+
+    return _proxy_out(db)
+
+
+def _scrub_secret(text_value: str, proxy_url: Optional[str]) -> str:
+    """Убирает из текста ошибки пароль/логин прокси, если библиотека
+    вдруг включила адрес в сообщение — чтобы секрет не оказался на экране."""
+    if not proxy_url:
+        return text_value
+    try:
+        parts = urlsplit(proxy_url)
+        for secret in (proxy_url, parts.password, parts.username):
+            if secret:
+                text_value = text_value.replace(secret, "***")
+    except ValueError:
+        pass
+    return text_value
+
+
+@app.post("/api/admin/ai-proxy/test", response_model=AiProxyTestOut)
+def test_ai_proxy(
+    data: AiProxyTestRequest,
+    db: Session = Depends(get_db),
+    current_user: models.User = Depends(require_admin),
+):
+    """Проверка, что через прокси реально открывается OpenRouter. Можно
+    проверить НОВЫЙ адрес до сохранения (передав proxy_url), либо уже
+    сохранённый (без параметров). Результат проверки — это данные, а не
+    ошибка сервера: даже если прокси не работает, ответ приходит обычным
+    кодом 200 с ok=false и пояснением по-русски."""
+    if data.proxy_url is not None and data.proxy_url.strip():
+        proxy_url: Optional[str] = _validate_proxy_url(data.proxy_url)
+        via = "через введённый прокси"
+    else:
+        proxy_url, _source = _get_ai_proxy(db)
+        via = "через сохранённый прокси" if proxy_url else "напрямую (прокси не используется)"
+
+    started = time.monotonic()
+    try:
+        client_kwargs: dict = {"timeout": 20}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        with httpx.Client(**client_kwargs) as client:
+            # Публичный список моделей — ключ не нужен. Главное — понять,
+            # пускает ли защита OpenRouter запросы с этого адреса (у
+            # заблокированного IP даже такой запрос получает 403).
+            resp = client.get("https://openrouter.ai/api/v1/models")
+    except ImportError:
+        return AiProxyTestOut(
+            ok=False,
+            message="Для прокси типа socks5 на сервере не установлен нужный компонент. Выполните на сервере: pip install -r requirements.txt и перезапустите сервис.",
+        )
+    except httpx.ProxyError as e:
+        return AiProxyTestOut(
+            ok=False,
+            message=_scrub_secret(f"Прокси не принял подключение (неверный логин/пароль или прокси выключен): {e}", proxy_url),
+        )
+    except httpx.TimeoutException:
+        return AiProxyTestOut(ok=False, message=f"Нет ответа за 20 секунд {via}. Прокси не отвечает или недоступен.")
+    except httpx.HTTPError as e:
+        return AiProxyTestOut(ok=False, message=_scrub_secret(f"Не удалось подключиться {via}: {e}", proxy_url))
+    except Exception as e:  # noqa: BLE001 — проверка не должна ронять сервер ни при каких обстоятельствах
+        return AiProxyTestOut(ok=False, message=_scrub_secret(f"Неожиданная ошибка при проверке: {e}", proxy_url))
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    if resp.status_code == 200:
+        return AiProxyTestOut(
+            ok=True, status_code=200, elapsed_ms=elapsed_ms,
+            message=f"Работает: OpenRouter открылся {via} за {elapsed_ms} мс.",
+        )
+    if resp.status_code == 403:
+        return AiProxyTestOut(
+            ok=False, status_code=403, elapsed_ms=elapsed_ms,
+            message=f"OpenRouter ответил 403 {via}: этот IP-адрес заблокирован их защитой. Нужен другой прокси.",
+        )
+    if resp.status_code == 407:
+        return AiProxyTestOut(
+            ok=False, status_code=407, elapsed_ms=elapsed_ms,
+            message="Прокси требует логин и пароль (407) — проверьте, что они указаны в адресе верно.",
+        )
+    return AiProxyTestOut(
+        ok=False, status_code=resp.status_code, elapsed_ms=elapsed_ms,
+        message=f"Неожиданный ответ {resp.status_code} {via}.",
+    )
 
 
 @app.get("/api/admin/ai-requests-log", response_model=List[AiRequestLogOut])
@@ -2103,7 +2305,10 @@ def draft_composite_fields_from_facts(
 
     synthesis_prompt = _build_synthesis_system_prompt(facts_clean, fields_with_prompts)
     try:
-        synth_parsed, usage = _call_openrouter_json(synthesis_prompt, "Составь тексты полей по инструкции выше.", ai_model)
+        proxy_url, _proxy_source = _get_ai_proxy(db)
+        synth_parsed, usage = _call_openrouter_json(
+            synthesis_prompt, "Составь тексты полей по инструкции выше.", ai_model, proxy_url=proxy_url,
+        )
     except HTTPException as e:
         _log_ai_request(db, case_id, "draft_narrative", ai_model, {}, None, success=False, error_message=e.detail, user_id=current_user.id)
         raise

@@ -2040,6 +2040,55 @@ def _proxy_out(db: Session) -> AiProxyOut:
     return AiProxyOut(enabled=bool(proxy_url), proxy_url_masked=_mask_proxy_url(proxy_url), source=source)
 
 
+# ---------- Остаток на балансе OpenRouter (плашка «$ 14.23» в левом меню) ----------
+# Эндпоинт OpenRouter /credits отдаёт баланс только по «Management key»
+# (openrouter.ai/settings/management-keys), обычный ключ для запросов к
+# моделям его не читает. Ключ кладётся в .env как OPENROUTER_MANAGEMENT_KEY.
+# Если он не задан или запрос не удался — плашка просто не показывается,
+# остальная работа не страдает. Ответ кэшируется на минуту: плашку
+# запрашивают все юристы, а баланс меняется не чаще, чем идут ИИ-запросы.
+OPENROUTER_MANAGEMENT_KEY = os.environ.get("OPENROUTER_MANAGEMENT_KEY")
+OPENROUTER_CREDITS_URL = "https://openrouter.ai/api/v1/credits"
+BALANCE_CACHE_SECONDS = 60
+_balance_cache: dict = {"at": 0.0, "value": None}
+
+
+@app.get("/api/ai/balance")
+def get_ai_balance(
+    db: Session = Depends(get_db),
+    user: models.User = Depends(get_current_user),
+):
+    now = time.monotonic()
+    cached = _balance_cache["value"]
+    if cached is not None and now - _balance_cache["at"] < BALANCE_CACHE_SECONDS:
+        return cached
+
+    unavailable = {"available": False, "balance": None}
+    key = OPENROUTER_MANAGEMENT_KEY or OPENROUTER_API_KEY
+    if not key:
+        return unavailable
+
+    result = unavailable
+    try:
+        proxy_url, _source = _get_ai_proxy(db)
+        client_kwargs: dict = {"timeout": 10}
+        if proxy_url:
+            client_kwargs["proxy"] = proxy_url
+        with httpx.Client(**client_kwargs) as client:
+            resp = client.get(OPENROUTER_CREDITS_URL, headers={"Authorization": f"Bearer {key}"})
+        if resp.status_code == 200:
+            data = (resp.json() or {}).get("data") or {}
+            total = float(data.get("total_credits", 0) or 0)
+            used = float(data.get("total_usage", 0) or 0)
+            result = {"available": True, "balance": round(total - used, 2)}
+    except Exception:  # noqa: BLE001 — плашка баланса не должна ронять ничего другого
+        result = unavailable
+
+    _balance_cache["at"] = now
+    _balance_cache["value"] = result
+    return result
+
+
 @app.get("/api/admin/ai-proxy", response_model=AiProxyOut)
 def get_ai_proxy_settings(
     db: Session = Depends(get_db),

@@ -9,6 +9,7 @@
 */
 
 const API = '/api';
+let balanceTimer = null; // таймер обновления плашки с балансом OpenRouter
 
 let state = {
   token: localStorage.getItem('lex_token') || null,
@@ -109,6 +110,8 @@ function doLogout(){
   document.getElementById('loginShell').style.display = 'flex';
   stopInactivityWatcher();
   stopCasesListPolling();
+  clearInterval(balanceTimer);
+  closeMobileNav();
 }
 
 // ---------- автоматический разлогин после бездействия ----------
@@ -145,13 +148,16 @@ function stopInactivityWatcher(){
 
 async function enterApp(){
   document.getElementById('loginShell').style.display = 'none';
-  document.getElementById('appShell').style.display = 'flex';
+  document.getElementById('appShell').style.display = '';
   startInactivityWatcher();
 
   const role = state.role || 'lawyer';
   const name = state.fullName || '—';
   document.getElementById('userName').textContent = name;
-  document.getElementById('userAvatar').textContent = name.slice(0,2).toUpperCase();
+  applySidebarState();
+  refreshBalance();
+  clearInterval(balanceTimer);
+  balanceTimer = setInterval(refreshBalance, 5 * 60 * 1000);
 
   if (role === 'admin'){
     document.getElementById('nav-admin').style.display = 'block';
@@ -174,7 +180,10 @@ async function enterApp(){
 
 function switchNav(screenId, btn){
   document.querySelectorAll('.screen').forEach(s=>s.classList.remove('active'));
-  document.getElementById('screen-'+screenId).classList.add('active');
+  const screenEl = document.getElementById('screen-'+screenId);
+  screenEl.classList.add('active');
+  screenEl.scrollTop = 0;
+  closeMobileNav();
   const parent = btn ? btn.closest('.sidenav') : null;
   if (parent){
     parent.querySelectorAll('.nav-item').forEach(b=>b.classList.remove('active'));
@@ -1122,134 +1131,181 @@ function renderCasesList(){
   }
   body.innerHTML = state.cases.map(c => `
     <tr>
-      <td>${escapeHtml(c.client_name)}</td>
-      <td>${escapeHtml(categoryName(c.category_id))}</td>
-      <td>${escapeHtml(c.created_by_email || c.created_by_name || '—')}</td>
+      <td class="c-name">${escapeHtml(c.client_name)}</td>
+      <td data-label="Категория">${escapeHtml(categoryName(c.category_id))}</td>
+      <td data-label="Автор">${escapeHtml(c.created_by_email || c.created_by_name || '—')}</td>
       <td><span class="badge badge-${c.status}">${statusLabel(c.status)}</span></td>
-      <td>${new Date(c.created_at).toLocaleDateString('ru-RU')}</td>
-      <td style="text-align:right;"><button class="btn btn-sm" onclick="openCase('${c.id}')">Открыть</button></td>
+      <td data-label="Создано">${new Date(c.created_at).toLocaleDateString('ru-RU')}</td>
+      <td class="c-act" style="text-align:right;"><button class="btn btn-sm" onclick="openCase('${c.id}')">Открыть</button></td>
     </tr>`).join('');
 }
 
-let newCaseTargetCategoryId = null; // выбранная (под)категория дела — итог визарда
-let newCaseSelectedBranch = null;   // направление — определяет, показывать ли "Кто заявитель"
+// ---------- мастер «Новое дело»: карточки вместо выпадающих списков ----------
+
+const BRANCH_CARDS = [
+  { value: 'svo',         label: 'Участники СВО',    icon: 'parachute' },
+  { value: 'civil_admin', label: 'Гражданские дела', icon: 'gavel' },
+];
+
+// Состояние мастера. targetId — итоговая (под)категория дела.
+let ncw = null;
+function ncwReset(){
+  ncw = { step: 'branch', branch: null, categoryId: null, subId: null, targetId: null,
+          client: '', applicant: '', packageId: '', packages: [] };
+}
+ncwReset();
+
+// Совместимость со старым кодом, который мог читать эти переменные.
+let newCaseTargetCategoryId = null;
+let newCaseSelectedBranch = null;
+
+function icon(name, cls){
+  return '<svg class="ic ' + (cls || '') + '"><use href="#i-' + name + '"/></svg>';
+}
 
 async function openNewCaseForm(){
   if (!state.categories.length){
     await loadCategories();
   }
-  // Сброс визарда на первый шаг при каждом открытии формы.
-  newCaseTargetCategoryId = null;
-  newCaseSelectedBranch = null;
-  document.getElementById('newCaseBranch').value = '';
-  document.getElementById('newCaseCategoryField').style.display = 'none';
-  document.getElementById('newCaseSubcategoryField').style.display = 'none';
-  document.getElementById('newCaseFinalFields').style.display = 'none';
-  document.getElementById('newCaseApplicantField').style.display = 'none';
-  document.getElementById('newCaseApplicant').value = '';
-  document.getElementById('newCaseClient').value = '';
-  document.getElementById('newCaseError').style.display = 'none';
+  ncwReset();
+  renderNewCaseWizard();
   switchNav('case-new', null);
 }
 
-function onNewCaseBranchChange(){
-  const branch = document.getElementById('newCaseBranch').value;
-  newCaseSelectedBranch = branch || null;
-  const categoryField = document.getElementById('newCaseCategoryField');
-  const subcategoryField = document.getElementById('newCaseSubcategoryField');
-  const finalFields = document.getElementById('newCaseFinalFields');
-  newCaseTargetCategoryId = null;
-  categoryField.style.display = 'none';
-  subcategoryField.style.display = 'none';
-  finalFields.style.display = 'none';
-  if (!branch) return;
-
-  const categorySelect = document.getElementById('newCaseCategory');
-  const tops = topLevelCategoriesOfBranch(branch);
-  categorySelect.innerHTML = '<option value="">— выберите категорию —</option>' +
-    tops.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-  categoryField.style.display = 'block';
+function ncwGo(step){
+  // Возврат на выбранный шаг: всё, что глубже, сбрасывается.
+  if (step === 'branch'){ ncw.branch = null; ncw.categoryId = null; ncw.subId = null; ncw.targetId = null; }
+  if (step === 'category'){ ncw.categoryId = null; ncw.subId = null; ncw.targetId = null; }
+  if (step === 'sub'){ ncw.subId = null; ncw.targetId = null; }
+  ncw.step = step;
+  renderNewCaseWizard();
 }
 
-function onNewCaseCategoryChange(){
-  const categoryId = document.getElementById('newCaseCategory').value;
-  const subcategoryField = document.getElementById('newCaseSubcategoryField');
-  const finalFields = document.getElementById('newCaseFinalFields');
-  newCaseTargetCategoryId = null;
-  finalFields.style.display = 'none';
-  if (!categoryId){
-    subcategoryField.style.display = 'none';
-    return;
-  }
-  const subSelect = document.getElementById('newCaseSubcategory');
-  const subs = subcategoriesOf(categoryId);
-  if (!subs.length){
-    // В этой категории нет подкатегорий — считаем её саму конечным узлом,
-    // как это уже принято для шаблонов без подкатегорий.
-    subcategoryField.style.display = 'none';
-    selectNewCaseCategoryTarget(categoryId);
-    return;
-  }
-  subSelect.innerHTML = '<option value="">— выберите подкатегорию —</option>' +
-    subs.map(c => `<option value="${c.id}">${escapeHtml(c.name)}</option>`).join('');
-  subcategoryField.style.display = 'block';
+function ncwPickBranch(value){
+  ncw.branch = value;
+  ncw.categoryId = ncw.subId = ncw.targetId = null;
+  ncw.step = 'category';
+  renderNewCaseWizard();
 }
 
-function onNewCaseSubcategoryChange(){
-  const subcategoryId = document.getElementById('newCaseSubcategory').value;
-  if (!subcategoryId){
-    newCaseTargetCategoryId = null;
-    document.getElementById('newCaseFinalFields').style.display = 'none';
-    return;
-  }
-  selectNewCaseCategoryTarget(subcategoryId);
-}
-
-async function selectNewCaseCategoryTarget(categoryId){
-  newCaseTargetCategoryId = categoryId;
-  document.getElementById('newCaseFinalFields').style.display = 'block';
-  // "Кто заявитель" — только для направления СВО; для гражданских/административных
-  // дел это поле не показываем и не отправляем (см. _svo_applicant_context на бэке).
-  const applicantField = document.getElementById('newCaseApplicantField');
-  if (newCaseSelectedBranch === 'svo'){
-    applicantField.style.display = 'block';
+function ncwPickCategory(id){
+  ncw.categoryId = id;
+  ncw.subId = ncw.targetId = null;
+  if (subcategoriesOf(id).length){
+    ncw.step = 'sub';
+    renderNewCaseWizard();
   } else {
-    applicantField.style.display = 'none';
-    document.getElementById('newCaseApplicant').value = '';
+    // Нет подкатегорий — сама категория конечный узел.
+    ncwFinish(id);
   }
-  const pkgField = document.getElementById('newCasePackageField');
-  const pkgSelect = document.getElementById('newCasePackage');
+}
+
+function ncwPickSub(id){
+  ncw.subId = id;
+  ncwFinish(id);
+}
+
+async function ncwFinish(targetId){
+  ncw.targetId = targetId;
+  newCaseTargetCategoryId = targetId;
+  newCaseSelectedBranch = ncw.branch;
+  ncw.packageId = '';
+  ncw.packages = [];
   try {
-    const packages = await api(`/packages?category_id=${categoryId}`);
-    if (!packages.length){
-      pkgField.style.display = 'none';
-      pkgSelect.innerHTML = '<option value="">— без пакета, выберу документы вручную —</option>';
-      return;
-    }
-    pkgSelect.innerHTML = '<option value="">— без пакета, выберу документы вручную —</option>' +
-      packages.map(p => `<option value="${p.id}">${escapeHtml(p.name)} (${p.items.length} док.)</option>`).join('');
-    pkgField.style.display = 'block';
+    ncw.packages = await api(`/packages?category_id=${targetId}`);
   } catch (err){
     toast('Ошибка загрузки пакетов: ' + err.message);
   }
+  ncw.step = 'final';
+  renderNewCaseWizard();
+}
+
+function ncwPickPackage(id){
+  ncw.packageId = id;
+  document.querySelectorAll('#newCaseWizard .pkg-card').forEach(el => {
+    el.classList.toggle('sel', el.dataset.pkg === id);
+  });
+}
+
+function renderNewCaseWizard(){
+  const box = document.getElementById('newCaseWizard');
+  if (!box) return;
+  const branchCard = BRANCH_CARDS.find(b => b.value === ncw.branch);
+  const cat = state.categories.find(c => c.id === ncw.categoryId);
+  const sub = state.categories.find(c => c.id === ncw.subId);
+
+  const crumbs = [];
+  if (branchCard) crumbs.push({ small: 'Направление', text: branchCard.label, go: 'branch' });
+  if (cat)        crumbs.push({ small: 'Категория', text: cat.name, go: 'category' });
+  if (sub)        crumbs.push({ small: 'Подкатегория', text: sub.name, go: 'sub' });
+  const isFinal = ncw.step === 'final';
+  const crumbsHtml = crumbs.length ? '<div class="wiz-crumbs">' + crumbs.map((c, i) => {
+    const last = i === crumbs.length - 1;
+    const arrow = (last && isFinal) ? '' : icon('chevron-right');
+    const inner = `<span class="crumb-in"><small>${c.small}</small><span>${escapeHtml(c.text)}</span></span>`;
+    return `<button class="crumb" onclick="ncwGo('${c.go}')" title="Изменить выбор">${inner}${arrow}</button>`;
+  }).join('') + '</div>' : '';
+
+  let body = '';
+  if (ncw.step === 'branch'){
+    body = '<div class="wiz-label">Выберите направление</div><div class="choice-grid">' +
+      BRANCH_CARDS.map(b => `<button class="choice-card" onclick="ncwPickBranch('${b.value}')">${icon(b.icon, 'ic-lg')}<span>${b.label}</span></button>`).join('') +
+      '</div>';
+  } else if (ncw.step === 'category'){
+    const tops = topLevelCategoriesOfBranch(ncw.branch);
+    body = '<div class="wiz-label">Выберите категорию</div>' + (tops.length
+      ? '<div class="choice-grid">' + tops.map(c => `<button class="choice-card" onclick="ncwPickCategory('${c.id}')"><span>${escapeHtml(c.name)}</span></button>`).join('') + '</div>'
+      : '<div class="muted-note">В этом направлении пока нет категорий</div>');
+  } else if (ncw.step === 'sub'){
+    const subs = subcategoriesOf(ncw.categoryId);
+    body = '<div class="wiz-label">Выберите подкатегорию</div><div class="choice-grid">' +
+      subs.map(c => `<button class="choice-card" onclick="ncwPickSub('${c.id}')"><span>${escapeHtml(c.name)}</span></button>`).join('') + '</div>';
+  } else {
+    const isSvo = ncw.branch === 'svo';
+    const pkgs = ncw.packages || [];
+    body = `
+      <div class="wiz-form">
+        <div class="field">
+          <label>${isSvo ? 'ФИО заявителя (полностью)' : 'ФИО клиента (полностью)'}</label>
+          <input id="newCaseClient" placeholder="Например: Иванов Иван Иванович" value="${escapeHtml(ncw.client)}" oninput="ncw.client=this.value">
+        </div>
+        ${isSvo ? `
+        <div class="field">
+          <label>Тип заявителя</label>
+          <select id="newCaseApplicant" onchange="ncw.applicant=this.value">
+            ${[['', '— выберите —'], ['военнослужащий', 'военнослужащий'], ['жена', 'жена'], ['мать', 'мать'], ['отец', 'отец'], ['брат', 'брат'], ['сестра', 'сестра']]
+              .map(([v, l]) => `<option value="${v}" ${ncw.applicant === v ? 'selected' : ''}>${l}</option>`).join('')}
+          </select>
+        </div>` : ''}
+      </div>
+      ${pkgs.length ? `
+      <div class="wiz-label">Выберите подходящий пакет документов</div>
+      <div class="pkg-grid">
+        ${pkgs.map(p => `<button class="pkg-card ${ncw.packageId === p.id ? 'sel' : ''}" data-pkg="${p.id}" onclick="ncwPickPackage('${p.id}')"><span class="radio"></span>${escapeHtml(p.name)}</button>`).join('')}
+        <button class="pkg-card plain ${ncw.packageId === '' ? 'sel' : ''}" data-pkg="" onclick="ncwPickPackage('')"><span class="radio"></span>Без пакета (выберу документы вручную)</button>
+      </div>` : ''}
+      <button class="btn-primary btn-lg" id="createCaseBtn" onclick="createCase()">Создать дело</button>
+      <div class="form-error" id="newCaseError" style="margin-top:14px;"></div>`;
+  }
+  box.innerHTML = crumbsHtml + body;
 }
 
 async function createCase(){
-  const client = document.getElementById('newCaseClient').value.trim();
-  const categoryId = newCaseTargetCategoryId;
-  const packageId = document.getElementById('newCasePackage').value || null;
-  const isSvo = newCaseSelectedBranch === 'svo';
-  const applicantType = isSvo ? document.getElementById('newCaseApplicant').value : null;
+  const client = (ncw.client || '').trim();
+  const categoryId = ncw.targetId;
+  const packageId = ncw.packageId || null;
+  const isSvo = ncw.branch === 'svo';
+  const applicantType = isSvo ? ncw.applicant : null;
   const errBox = document.getElementById('newCaseError');
   errBox.style.display = 'none';
 
   if (!client || !categoryId){
-    errBox.textContent = 'Пройдите шаги направления/категории/подкатегории и укажите имя клиента';
+    errBox.textContent = 'Укажите ФИО клиента';
     errBox.style.display = 'block';
     return;
   }
   if (isSvo && !applicantType){
-    errBox.textContent = 'Для направления СВО укажите, кто заявитель';
+    errBox.textContent = 'Для направления СВО укажите тип заявителя';
     errBox.style.display = 'block';
     return;
   }
@@ -1293,9 +1349,7 @@ async function openCase(caseId){
     }
 
     document.getElementById('caseTitle').textContent = currentCase.client_name;
-    document.getElementById('caseSub').textContent =
-      categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status) +
-      (currentCase.created_by_email ? ' · автор: ' + currentCase.created_by_email : '');
+    setCaseSub();
 
     document.getElementById('caseNarrativeText').value = currentCase.raw_narrative || '';
     document.getElementById('aiExtractError').style.display = 'none';
@@ -1362,11 +1416,11 @@ function renderCaseTemplatesBox(available){
 
   function renderGroup(box, items){
     if (!items.length){
-      box.innerHTML = '<div style="color:var(--muted);font-size:13px;">Нет доступных шаблонов</div>';
+      box.innerHTML = '<div class="muted-note">Нет доступных шаблонов</div>';
       return;
     }
     box.innerHTML = items.map(t => `
-      <label style="display:flex;align-items:center;gap:9px;padding:6px 0;font-size:13.5px;">
+      <label class="tpl-check">
         <input type="checkbox" value="${t.id}" ${currentCaseSelectedTemplates.has(t.id) ? 'checked' : ''}
           onchange="onCaseTemplateToggle()">
         ${escapeHtml(t.name)}
@@ -1732,7 +1786,7 @@ async function loadAiRequestsLog(){
 
 // ---------- сканы документов дела ----------
 
-const ATTACHMENT_ICONS = { 'application/pdf': '📄', 'image/jpeg': '🖼', 'image/png': '🖼', 'image/webp': '🖼' };
+const ATTACHMENT_ICONS = { 'application/pdf': 'file-text' };
 
 async function loadCaseAttachments(){
   if (!currentCase) return;
@@ -1749,13 +1803,13 @@ function renderCaseAttachments(list){
   currentCaseAttachmentsCount = list.length;
   const box = document.getElementById('caseAttachmentsList');
   if (!list.length){
-    box.innerHTML = '<div style="color:var(--muted);font-size:12px;">Сканы пока не загружены</div>';
+    box.innerHTML = '<div class="muted-note" style="font-size:12.5px;">Сканы пока не загружены</div>';
     return;
   }
   box.innerHTML = list.map(a => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border-soft);">
-      <span style="font-size:12.5px;">${ATTACHMENT_ICONS[a.content_type] || '📎'} ${escapeHtml(a.original_filename)}</span>
-      <button class="icon-btn danger" title="Удалить" onclick="deleteCaseAttachment('${a.id}')">🗑</button>
+    <div class="att-row">
+      <span>${icon(ATTACHMENT_ICONS[a.content_type] || 'paperclip')} ${escapeHtml(a.original_filename)}</span>
+      <button class="icon-btn danger" title="Удалить" onclick="deleteCaseAttachment('${a.id}')">${icon('trash-2')}</button>
     </div>`).join('');
 }
 
@@ -1824,7 +1878,7 @@ function updateAiButtonsState(){
   const hasFacts = !!(currentCase && currentCase.ai_facts && currentCase.ai_facts.length);
 
   analyzeBtn.disabled = !hasTemplates;
-  hint.textContent = hasTemplates ? '' : 'Сначала выберите документы слева — по ним ИИ поймёт, какие поля искать';
+  hint.textContent = hasTemplates ? '' : 'Сначала выберите документы в «Шаблонах для этого дела» — по ним ИИ поймёт, какие поля искать';
 
   draftBtn.disabled = !hasTemplates || !hasFacts;
   draftBtn.title = !hasTemplates
@@ -2048,7 +2102,7 @@ function renderCaseDocTabs(available){
     groupTabsBox.innerHTML = '';
     tabsBox.innerHTML = '';
     document.getElementById('docPreviewTitle').textContent = '—';
-    document.getElementById('docBody').innerHTML = '<div class="doc-body-empty">Отметьте документ слева, чтобы увидеть предпросмотр</div>';
+    document.getElementById('docBody').innerHTML = '<div class="doc-body-empty">Отметьте документ в «Шаблонах для этого дела», чтобы увидеть предпросмотр</div>';
     setEditModeUI(false);
     currentDocTabId = null;
     return;
@@ -2139,9 +2193,10 @@ function updateGenerateButtonState(){
   const btn = document.getElementById('generateDocsBtn');
   if (!btn) return;
   const alreadyGenerated = !!(currentCase && currentCase.documents && currentCase.documents.length);
+  const nothingSelected = !currentCaseSelectedTemplates || !currentCaseSelectedTemplates.size;
   if (!alreadyGenerated){
     btn.textContent = 'Сгенерировать документы';
-    btn.disabled = false;
+    btn.disabled = nothingSelected;
     return;
   }
   btn.textContent = 'Обновить документы';
@@ -2344,9 +2399,7 @@ async function generateDocuments(){
     });
     currentCase = await api(`/cases/${currentCase.id}`);
     renderCaseDocuments();
-    document.getElementById('caseSub').textContent =
-      categoryName(currentCase.category_id) + ' · ' + statusLabel(currentCase.status) +
-      (currentCase.created_by_email ? ' · автор: ' + currentCase.created_by_email : '');
+    setCaseSub();
     caseHasPendingChanges = false;
     updateGenerateButtonState();
     toast(wasAlreadyGenerated ? 'Документы обновлены' : 'Документы сгенерированы');
@@ -2357,21 +2410,21 @@ async function generateDocuments(){
 }
 
 function renderCaseDocuments(){
-  const box = document.getElementById('caseDocsBox');
   const body = document.getElementById('caseDocsBody');
+  const dl = document.getElementById('caseDocsDownloadAll');
   const docs = (currentCase && currentCase.documents) || [];
+  if (dl) dl.style.display = docs.length ? 'flex' : 'none';
   if (!docs.length){
-    box.style.display = 'none';
+    body.innerHTML = '<tr><td colspan="3" style="color:var(--muted);">Документы ещё не сгенерированы</td></tr>';
     return;
   }
-  box.style.display = 'block';
   body.innerHTML = docs.map(d => `
     <tr>
       <td>${escapeHtml(d.template_name)}</td>
       <td>${new Date(d.generated_at).toLocaleString('ru-RU')}</td>
       <td style="text-align:right;white-space:nowrap;">
-        <button class="btn btn-sm" onclick="downloadCaseDocument('${d.id}','docx')">Скачать .docx</button>
-        ${d.has_pdf ? `<button class="btn btn-sm" onclick="downloadCaseDocument('${d.id}','pdf')">Скачать .pdf</button>` : ''}
+        <button class="btn btn-sm" onclick="downloadCaseDocument('${d.id}','docx')">.docx</button>
+        ${d.has_pdf ? `<button class="btn btn-sm" onclick="downloadCaseDocument('${d.id}','pdf')">.pdf</button>` : ''}
       </td>
     </tr>`).join('');
 }
@@ -2450,3 +2503,81 @@ function escapeHtml(s){
   }
   document.getElementById('loginShell').style.display = 'flex';
 })();
+
+
+// =====================================================================
+// Оболочка интерфейса: меню, баланс, тема, карточка дела
+// =====================================================================
+
+// Сворачивание левого меню (на ПК) и выезжающее меню (планшет/телефон).
+function applySidebarState(){
+  const collapsed = localStorage.getItem('lex_side_collapsed') === '1';
+  document.getElementById('appShell').classList.toggle('collapsed', collapsed);
+}
+function toggleSidebar(){
+  const shell = document.getElementById('appShell');
+  const now = !shell.classList.contains('collapsed');
+  shell.classList.toggle('collapsed', now);
+  try { localStorage.setItem('lex_side_collapsed', now ? '1' : '0'); } catch (e) {}
+}
+function toggleMobileNav(){ document.getElementById('appShell').classList.toggle('nav-open'); }
+function closeMobileNav(){
+  const shell = document.getElementById('appShell');
+  if (shell) shell.classList.remove('nav-open');
+}
+
+// Раскрывающиеся секции карточки дела (можно держать открытыми несколько сразу).
+function toggleAcc(id){
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle('open');
+}
+
+// Цветовая схема. Схемы описаны в style.css блоками :root[data-theme="..."].
+// Позже сюда подключится выбор в «Настройках кабинета».
+function setTheme(name){
+  if (name) document.documentElement.dataset.theme = name;
+  else delete document.documentElement.dataset.theme;
+  try { name ? localStorage.setItem('lex_theme', name) : localStorage.removeItem('lex_theme'); } catch (e) {}
+}
+function openProfileSettings(){
+  toast('Настройки кабинета (цветовая схема и др.) — скоро');
+}
+
+// Остаток на балансе OpenRouter (плашка в левом меню, видна всем).
+async function refreshBalance(){
+  const chip = document.getElementById('balanceChip');
+  if (!chip || !state.token) return;
+  try {
+    const d = await api('/ai/balance');
+    if (d && d.available && typeof d.balance === 'number'){
+      chip.textContent = '$ ' + d.balance.toFixed(2);
+      chip.classList.toggle('low', d.balance < 2);
+      chip.style.display = 'inline-flex';
+    } else {
+      chip.style.display = 'none';
+    }
+  } catch (err){
+    chip.style.display = 'none';
+  }
+}
+// После каждого обращения к ИИ баланс меняется — обновляем плашку.
+['runAiAnalyze', 'runAiDraftFields'].forEach(name => {
+  const orig = window[name];
+  if (typeof orig !== 'function') return;
+  window[name] = async function(){
+    try { return await orig.apply(this, arguments); }
+    finally { setTimeout(refreshBalance, 1500); }
+  };
+});
+
+// Подзаголовок карточки дела: «Направление > Категория · Автор: … · [статус]».
+function setCaseSub(){
+  const el = document.getElementById('caseSub');
+  if (!el || !currentCase) return;
+  const cat = state.categories.find(c => c.id === currentCase.category_id);
+  const branch = cat ? BRANCH_CARDS.find(b => b.value === cat.branch) : null;
+  const path = (branch ? branch.label + ' > ' : '') + (cat ? cat.name : '—');
+  el.innerHTML = '<span>' + escapeHtml(path) + '</span>' +
+    (currentCase.created_by_email ? '<span>Автор: ' + escapeHtml(currentCase.created_by_email) + '</span>' : '') +
+    '<span class="badge badge-' + currentCase.status + '">' + escapeHtml(statusLabel(currentCase.status)) + '</span>';
+}

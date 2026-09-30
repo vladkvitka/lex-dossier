@@ -4,15 +4,117 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Лекс.Досье</title>
-<link rel="stylesheet" href="style.css">
+<link rel="icon" type="image/png" href="logo.png">
+<link rel="preload" href="fonts/jost-cyrillic-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="style.css?v=25">
+<script>try{var t=localStorage.getItem('lex_theme');if(t)document.documentElement.dataset.theme=t;}catch(e){}</script>
 </head>
 <body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+<symbol id="i-folder-open" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" /></symbol>
+<symbol id="i-notebook" viewBox="0 0 24 24"><path d="M2 6h4" />
+  <path d="M2 10h4" />
+  <path d="M2 14h4" />
+  <path d="M2 18h4" />
+  <rect width="16" height="20" x="4" y="2" rx="2" />
+  <path d="M16 2v20" /></symbol>
+<symbol id="i-list" viewBox="0 0 24 24"><path d="M3 5h.01" />
+  <path d="M3 12h.01" />
+  <path d="M3 19h.01" />
+  <path d="M8 5h13" />
+  <path d="M8 12h13" />
+  <path d="M8 19h13" /></symbol>
+<symbol id="i-layout-list" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1" />
+  <rect width="7" height="7" x="3" y="14" rx="1" />
+  <path d="M14 4h7" />
+  <path d="M14 9h7" />
+  <path d="M14 15h7" />
+  <path d="M14 20h7" /></symbol>
+<symbol id="i-square-code" viewBox="0 0 24 24"><path d="m10 9-3 3 3 3" />
+  <path d="m14 15 3-3-3-3" />
+  <rect x="3" y="3" width="18" height="18" rx="2" /></symbol>
+<symbol id="i-message-square-code" viewBox="0 0 24 24"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z" />
+  <path d="m10 8-3 3 3 3" />
+  <path d="m14 14 3-3-3-3" /></symbol>
+<symbol id="i-panel-left" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" />
+  <path d="M9 3v18" /></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14" />
+  <path d="M12 5v14" /></symbol>
+<symbol id="i-arrow-left" viewBox="0 0 24 24"><path d="m12 19-7-7 7-7" />
+  <path d="M19 12H5" /></symbol>
+<symbol id="i-square-pen" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+  <path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" /></symbol>
+<symbol id="i-trash-2" viewBox="0 0 24 24"><path d="M10 11v6" />
+  <path d="M14 11v6" />
+  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" />
+  <path d="M3 6h18" />
+  <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" /></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915" />
+  <circle cx="12" cy="12" r="3" /></symbol>
+<symbol id="i-log-out" viewBox="0 0 24 24"><path d="m16 17 5-5-5-5" />
+  <path d="M21 12H9" />
+  <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /></symbol>
+<symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" /></symbol>
+<symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6" /></symbol>
+<symbol id="i-calendar" viewBox="0 0 24 24"><path d="M8 2v3" />
+  <path d="M16 2v3" />
+  <rect x="3" y="3" width="18" height="18" rx="2" />
+  <path d="M3 9h18" /></symbol>
+<symbol id="i-paperclip" viewBox="0 0 24 24"><path d="m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551" /></symbol>
+<symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 3v12" />
+  <path d="m17 8-5-5-5 5" />
+  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /></symbol>
+<symbol id="i-file-text" viewBox="0 0 24 24"><path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" />
+  <path d="M14 2v5a1 1 0 0 0 1 1h5" />
+  <path d="M10 9H8" />
+  <path d="M16 13H8" />
+  <path d="M16 17H8" /></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 15V3" />
+  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+  <path d="m7 10 5 5 5-5" /></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18" />
+  <path d="m6 6 12 12" /></symbol>
+<symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 5h16" />
+  <path d="M4 12h16" />
+  <path d="M4 19h16" /></symbol>
+<symbol id="i-gavel" viewBox="0 0 24 24"><path d="m14 13-8.381 8.38a1 1 0 0 1-3.001-3l8.384-8.381" />
+  <path d="m16 16 6-6" />
+  <path d="m21.5 10.5-8-8" />
+  <path d="m8 8 6-6" />
+  <path d="m8.5 7.5 8 8" /></symbol>
+<symbol id="i-sparkles" viewBox="0 0 24 24"><path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" />
+  <path d="M20 2v4" />
+  <path d="M22 4h-4" />
+  <circle cx="4" cy="20" r="2" /></symbol>
+<symbol id="i-scroll-text" viewBox="0 0 24 24"><path d="M15 12h-5" />
+  <path d="M15 8h-5" />
+  <path d="M19 17V5a2 2 0 0 0-2-2H4" />
+  <path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3" /></symbol>
+<symbol id="i-file-pen" viewBox="0 0 24 24"><path d="M12.659 22H18a2 2 0 0 0 2-2V8a2.4 2.4 0 0 0-.706-1.706l-3.588-3.588A2.4 2.4 0 0 0 14 2H6a2 2 0 0 0-2 2v9.34" />
+  <path d="M14 2v5a1 1 0 0 0 1 1h5" />
+  <path d="M10.378 12.622a1 1 0 0 1 3 3.003L8.36 20.637a2 2 0 0 1-.854.506l-2.867.837a.5.5 0 0 1-.62-.62l.836-2.869a2 2 0 0 1 .506-.853z" /></symbol>
+<symbol id="i-user" viewBox="0 0 24 24"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" />
+  <circle cx="12" cy="7" r="4" /></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5" /></symbol>
+<symbol id="i-files" viewBox="0 0 24 24"><path d="M15 2h-4a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V8" />
+  <path d="M16.706 2.706A2.4 2.4 0 0 0 15 2v5a1 1 0 0 0 1 1h5a2.4 2.4 0 0 0-.706-1.706z" />
+  <path d="M5 7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h8a2 2 0 0 0 1.732-1" /></symbol>
+<symbol id="i-sliders-horizontal" viewBox="0 0 24 24"><path d="M10 5H3" />
+  <path d="M12 19H3" />
+  <path d="M14 3v4" />
+  <path d="M16 17v4" />
+  <path d="M21 12h-9" />
+  <path d="M21 19h-5" />
+  <path d="M21 5h-7" />
+  <path d="M8 10v4" />
+  <path d="M8 12H3" /></symbol>
+<symbol id="i-parachute" viewBox="0 0 24 24"><path d="M3 10a9 8 0 0 1 18 0c-1.5-1.3-3-1.3-4.5 0-1.5-1.3-3-1.3-4.5 0-1.5-1.3-3-1.3-4.5 0C6 8.7 4.5 8.7 3 10Z"/><path d="M3 10l8.5 8M21 10l-8.5 8M9.2 10.3 11.3 18M14.8 10.3 12.7 18"/><rect x="10" y="18" width="4" height="3.5" rx="1"/></symbol>
+</svg>
 
 <!-- ===== ЭКРАН ВХОДА ===== -->
 <div class="login-shell" id="loginShell">
   <div class="login-card">
-    <div class="login-brand">Лекс.Досье</div>
-    <div class="login-tag">Система подготовки документов</div>
+    <div class="login-logo"><img src="logo.png" alt=""><div><b>ЛЕКС.ДОСЬЕ</b><small>Умные документы</small></div></div>
     <div class="login-error" id="loginError"></div>
     <div class="field">
       <label>Email</label>
@@ -29,220 +131,183 @@
 <!-- ===== ОСНОВНОЕ ПРИЛОЖЕНИЕ ===== -->
 <div class="app" id="appShell" style="display:none;">
 
-  <div class="topbar">
-    <div class="brand">
-      <div class="brand-mark">Лекс.Досье</div>
-      <div class="brand-tag">Система подготовки документов</div>
-    </div>
-    <div class="top-right">
-      <div class="user-chip">
-        <div class="avatar" id="userAvatar">—</div>
-        <span id="userName">—</span>
-      </div>
-      <button class="logout-btn" onclick="doLogout()">Выйти</button>
-    </div>
+  <div class="brand-row">
+    <img src="logo.png" alt="">
+    <div class="brand-text"><b>ЛЕКС.ДОСЬЕ</b><small>Умные документы</small></div>
+    <button class="burger" onclick="toggleMobileNav()" aria-label="Меню"><svg class="ic "><use href="#i-menu"/></svg></button>
   </div>
 
-  <div class="body-row">
-
-    <!-- ===== НАВИГАЦИЯ ДЛЯ ЮРИСТА ===== -->
-    <div class="sidenav" id="nav-lawyer" style="display:none;">
-      <div class="sidenav-section">
-        <div class="sidenav-label">Рабочее пространство</div>
-        <button class="nav-item active" data-nav="cases-list" onclick="openCasesListNav(this)">Дела</button>
+  <aside class="sidebar">
+    <div class="side-scroll">
+      <div class="side-head">
+        <span class="side-title">Рабочая область</span>
+        <button class="icon-plain collapse-btn" onclick="toggleSidebar()" title="Свернуть меню"><svg class="ic "><use href="#i-panel-left"/></svg></button>
       </div>
-    </div>
 
-    <!-- ===== НАВИГАЦИЯ ДЛЯ АДМИНА ===== -->
-    <div class="sidenav" id="nav-admin" style="display:none;">
-      <div class="sidenav-section">
-        <div class="sidenav-label">Рабочее пространство</div>
-        <button class="nav-item" data-nav="cases-list" onclick="openCasesListNav(this)">Дела</button>
+      <!-- ===== НАВИГАЦИЯ ДЛЯ ЮРИСТА ===== -->
+      <div class="sidenav" id="nav-lawyer" style="display:none;">
+        <button class="nav-item active" data-nav="cases-list" title="Дела" onclick="openCasesListNav(this)"><svg class="ic "><use href="#i-folder-open"/></svg><span class="nav-text">Дела</span></button>
       </div>
-      <div class="sidenav-section">
+
+      <!-- ===== НАВИГАЦИЯ ДЛЯ АДМИНА ===== -->
+      <div class="sidenav" id="nav-admin" style="display:none;">
+        <button class="nav-item" data-nav="cases-list" title="Дела" onclick="openCasesListNav(this)"><svg class="ic "><use href="#i-folder-open"/></svg><span class="nav-text">Дела</span></button>
         <div class="sidenav-label">Управление</div>
-        <button class="nav-item active" data-nav="admin-categories" onclick="switchNav('admin-categories', this)">Категории</button>
-        <button class="nav-item" data-nav="admin-templates" onclick="switchNav('admin-templates', this)">Шаблоны</button>
-        <button class="nav-item" data-nav="admin-packages" onclick="switchNav('admin-packages', this)">Пакеты</button>
-        <button class="nav-item" data-nav="admin-ai-settings" onclick="switchNav('admin-ai-settings', this); loadAiSettings();">Настройки ИИ</button>
-        <button class="nav-item" data-nav="admin-ai-prompts" onclick="switchNav('admin-ai-prompts', this); loadAiFieldPrompts();">Промпты полей</button>
-        <button class="nav-item" data-nav="admin-ai-log" onclick="switchNav('admin-ai-log', this); loadAiRequestsLog();">Лог ИИ-запросов</button>
+        <button class="nav-item active" data-nav="admin-categories" title="Категории" onclick="switchNav('admin-categories', this)"><svg class="ic "><use href="#i-notebook"/></svg><span class="nav-text">Категории</span></button>
+        <button class="nav-item" data-nav="admin-templates" title="Шаблоны" onclick="switchNav('admin-templates', this)"><svg class="ic "><use href="#i-list"/></svg><span class="nav-text">Шаблоны</span></button>
+        <button class="nav-item" data-nav="admin-packages" title="Пакеты" onclick="switchNav('admin-packages', this)"><svg class="ic "><use href="#i-layout-list"/></svg><span class="nav-text">Пакеты</span></button>
+        <button class="nav-item" data-nav="admin-ai-settings" title="Настройки ИИ" onclick="switchNav('admin-ai-settings', this); loadAiSettings();"><svg class="ic "><use href="#i-sliders-horizontal"/></svg><span class="nav-text">Настройки ИИ</span></button>
+        <button class="nav-item" data-nav="admin-ai-prompts" title="ИИ промпты" onclick="switchNav('admin-ai-prompts', this); loadAiFieldPrompts();"><svg class="ic "><use href="#i-square-code"/></svg><span class="nav-text">ИИ промпты</span></button>
+        <button class="nav-item" data-nav="admin-ai-log" title="Лог ИИ-запросов" onclick="switchNav('admin-ai-log', this); loadAiRequestsLog();"><svg class="ic "><use href="#i-scroll-text"/></svg><span class="nav-text">Лог ИИ-запросов</span></button>
       </div>
     </div>
 
-    <div class="main">
-
-      <!-- ===== СПИСОК ДЕЛ ===== -->
-      <div class="screen active" id="screen-cases-list">
-        <h1 class="page-title">Дела</h1>
-        <p class="page-sub">Дела клиентов и статус подготовки документов по ним</p>
-        <button class="btn-primary" style="margin-bottom:16px;" onclick="openNewCaseForm()">+ Новое дело</button>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>Клиент</th><th>Категория</th><th>Автор</th><th>Статус</th><th>Создано</th><th></th></tr></thead>
-            <tbody id="casesListBody"></tbody>
-          </table>
-        </div>
+    <div class="side-user">
+      <div class="side-user-name" id="userName">—</div>
+      <div class="side-user-tools">
+        <span class="chip" id="balanceChip" title="Остаток на балансе OpenRouter" style="display:none;">$ —</span>
+        <button class="tool-btn" title="Настройки кабинета" onclick="openProfileSettings()"><svg class="ic "><use href="#i-settings"/></svg></button>
+        <button class="tool-btn" title="Выйти" onclick="doLogout()"><svg class="ic "><use href="#i-log-out"/></svg></button>
       </div>
+    </div>
+  </aside>
+  <div class="side-overlay" onclick="closeMobileNav()"></div>
 
-      <!-- ===== НОВОЕ ДЕЛО ===== -->
-      <div class="screen" id="screen-case-new">
+  <div class="main">
+
+    <!-- ===== СПИСОК ДЕЛ ===== -->
+    <div class="screen active" id="screen-cases-list">
+      <h1 class="page-title">Дела</h1>
+      <p class="page-sub">Дела клиентов и статус подготовки документов по ним</p>
+      <button class="btn-primary" style="margin-bottom:22px;" onclick="openNewCaseForm()"><svg class="ic "><use href="#i-plus"/></svg> Новое дело</button>
+      <div class="table-wrap">
+        <table class="cases-table">
+          <thead><tr><th>Клиент</th><th>Категория</th><th>Автор</th><th>Статус</th><th>Создано</th><th></th></tr></thead>
+          <tbody id="casesListBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ===== НОВОЕ ДЕЛО ===== -->
+    <div class="screen" id="screen-case-new">
+      <div class="page-head">
         <h1 class="page-title">Новое дело</h1>
-        <p class="page-sub">Направление → категория → подкатегория — дальше клиент, пакет документов и создание дела</p>
-        <button class="btn" style="margin-bottom:16px;" onclick="openCasesListNav(null)">← К списку дел</button>
-        <div class="upload-zone">
-          <div class="field">
-            <label>1. Направление</label>
-            <select id="newCaseBranch" onchange="onNewCaseBranchChange()">
-              <option value="">— выберите направление —</option>
-              <option value="svo">Участники СВО</option>
-              <option value="civil_admin">Гражданские и административные дела</option>
-            </select>
+        <button class="btn btn-sm btn-back" onclick="openCasesListNav(null)"><svg class="ic "><use href="#i-arrow-left"/></svg> К списку дел</button>
+      </div>
+      <div id="newCaseWizard"></div>
+    </div>
+
+    <!-- ===== КАРТОЧКА ДЕЛА ===== -->
+    <div class="screen" id="screen-case-detail">
+
+      <div class="case-center">
+
+        <div class="card case-head">
+          <h1 id="caseTitle">Дело</h1>
+          <div class="case-sub" id="caseSub"></div>
+          <div class="case-tools">
+            <button class="tool-btn" title="Изменить ФИО / название дела" onclick="renameCurrentCase()"><svg class="ic "><use href="#i-square-pen"/></svg></button>
+            <button class="tool-btn danger" title="Удалить дело" onclick="deleteCurrentCase()"><svg class="ic "><use href="#i-trash-2"/></svg></button>
           </div>
-          <div class="field" id="newCaseCategoryField" style="display:none;">
-            <label>2. Категория</label>
-            <select id="newCaseCategory" onchange="onNewCaseCategoryChange()">
-              <option value="">— выберите категорию —</option>
-            </select>
-          </div>
-          <div class="field" id="newCaseSubcategoryField" style="display:none;">
-            <label>3. Подкатегория</label>
-            <select id="newCaseSubcategory" onchange="onNewCaseSubcategoryChange()">
-              <option value="">— выберите подкатегорию —</option>
-            </select>
-          </div>
-          <div id="newCaseFinalFields" style="display:none;">
-            <div class="field">
-              <label>Имя клиента</label>
-              <input id="newCaseClient" placeholder="Например: Иванов Иван Иванович">
+
+          <div class="acc soft" id="accTemplates" style="margin-top:20px;">
+            <button class="acc-head" onclick="toggleAcc('accTemplates')">Шаблоны для этого дела <svg class="ic chev"><use href="#i-chevron-down"/></svg></button>
+            <div class="acc-body">
+              <div class="doc-group-columns">
+                <div>
+                  <div class="doc-group-label">Основные</div>
+                  <div id="caseTemplatesBoxMain"></div>
+                </div>
+                <div>
+                  <div class="doc-group-label">Служебные</div>
+                  <div id="caseTemplatesBoxService"></div>
+                </div>
+              </div>
             </div>
-            <div class="field" id="newCaseApplicantField" style="display:none;">
-              <label>Кто заявитель</label>
-              <select id="newCaseApplicant">
-                <option value="">— выберите —</option>
-                <option value="военнослужащий">Военнослужащий</option>
-                <option value="жена">Жена</option>
-                <option value="мать">Мать</option>
-                <option value="отец">Отец</option>
-                <option value="брат">Брат</option>
-                <option value="сестра">Сестра</option>
-              </select>
-            </div>
-            <div class="field" id="newCasePackageField" style="display:none;">
-              <label>Пакет документов (необязательно)</label>
-              <select id="newCasePackage">
-                <option value="">— без пакета, выберу документы вручную —</option>
-              </select>
-            </div>
-            <button class="btn-primary" id="createCaseBtn" onclick="createCase()">Создать дело</button>
           </div>
-          <div class="login-error" id="newCaseError" style="margin-top:10px;"></div>
         </div>
+
+        <div class="card acc" id="accAi">
+          <button class="acc-head" onclick="toggleAcc('accAi')">Разобрать через ИИ <svg class="ic chev"><use href="#i-chevron-down"/></svg></button>
+          <div class="acc-body" id="caseNarrativeBox">
+            <div class="ai-block">
+              <div class="ai-block-head">
+                <strong>Сканы документов (медсправки, эпикризы, отказы и т.п.)</strong>
+                <label class="btn btn-sm" style="margin:0;">
+                  <svg class="ic "><use href="#i-upload"/></svg> Загрузить файлы
+                  <input type="file" id="caseAttachmentInput" accept="image/jpeg,image/png,image/webp,application/pdf" multiple style="display:none;" onchange="uploadCaseAttachments(this.files)">
+                </label>
+              </div>
+              <div class="muted-note" style="font-size:12.5px;margin-bottom:8px;">JPG, PNG, WEBP или PDF, до 15 МБ на файл. Файлы уходят во внешний ИИ-сервис вместе с текстом фабулы при разборе — не загружайте лишнего.</div>
+              <div id="caseAttachmentsList"></div>
+              <div class="form-error" id="caseAttachmentsError" style="margin-top:8px;"></div>
+            </div>
+
+            <div class="field" style="margin-bottom:12px;">
+              <textarea id="caseNarrativeText" rows="6" placeholder="Вставьте сюда сырой текст фабулы от клиента — ИИ попробует найти в нём значения для простых полей формы (ФИО, даты, адреса и т.п.)" oninput="scheduleSaveNarrative()"></textarea>
+            </div>
+            <div class="ai-actions">
+              <button class="btn-primary btn-sm" id="aiExtractBtn" onclick="runAiAnalyze()">Разобрать дело через ИИ</button>
+              <button class="btn btn-sm" id="aiDraftBtn" onclick="runAiDraftFields()">Собрать обстоятельства дела</button>
+              <span id="aiExtractHint" class="muted-note" style="font-size:12.5px;"></span>
+            </div>
+            <div class="form-error" id="aiExtractError" style="margin-top:12px;"></div>
+            <div class="facts-panel" id="aiFactsPanel" style="display:none;">
+              <div class="facts-head" onclick="toggleAiFactsPanel()">
+                <strong>Факты, найденные ИИ (<span id="aiFactsCount">0</span>) — сверьте с источниками</strong>
+                <span id="aiFactsToggleIcon">▾</span>
+              </div>
+              <ul id="aiFactsListBox" style="display:none;"></ul>
+            </div>
+          </div>
+        </div>
+
+        <div class="card acc grow open" id="caseFormBox" style="display:none;">
+          <button class="acc-head" onclick="toggleAcc('caseFormBox')">Данные дела <svg class="ic chev"><use href="#i-chevron-down"/></svg></button>
+          <div class="acc-hint">Данные сохраняются автоматически по мере ввода</div>
+          <div class="acc-body" id="caseFieldsBox"></div>
+        </div>
+
+        <div class="card acc" id="caseDocsBox">
+          <div class="case-foot">
+            <button class="acc-head" style="width:auto;" onclick="toggleAcc('caseDocsBox')">Готовые документы <svg class="ic chev"><use href="#i-chevron-down"/></svg></button>
+            <button class="btn-primary" id="generateDocsBtn" onclick="generateDocuments()">Сгенерировать документы</button>
+          </div>
+          <div class="acc-body">
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>Документ</th><th>Создан</th><th></th></tr></thead>
+                <tbody id="caseDocsBody"></tbody>
+              </table>
+            </div>
+            <div class="foot-actions" id="caseDocsDownloadAll">
+              <button class="btn btn-sm" onclick="downloadAllCaseDocuments('docx')"><svg class="ic "><use href="#i-download"/></svg> Пакет в docx</button>
+              <button class="btn btn-sm" onclick="downloadAllCaseDocuments('pdf')"><svg class="ic "><use href="#i-download"/></svg> Пакет в PDF</button>
+            </div>
+          </div>
+          <div class="form-error" id="caseFormError" style="margin-top:12px;"></div>
+        </div>
+
       </div>
 
-      <!-- ===== КАРТОЧКА ДЕЛА ===== -->
-      <div class="screen" id="screen-case-detail">
-        <h1 class="page-title" id="caseTitle">Дело</h1>
-        <p class="page-sub" id="caseSub"></p>
-        <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;">
-          <button class="btn" onclick="openCasesListNav(null)">← К списку дел</button>
-          <button class="btn" onclick="renameCurrentCase()">Переименовать</button>
-          <button class="btn" style="color:var(--wine);" onclick="deleteCurrentCase()">Удалить дело</button>
-        </div>
-
-        <div class="notice">1. Выберите документы → 2. Заполните форму (предпросмотр справа обновится сам) → 3. Сгенерируйте и скачайте</div>
-
-        <div class="case-columns">
-          <div>
-            <h2 style="font-size:15px;margin:0 0 10px;">Документы для этого дела</h2>
-            <div class="doc-group-columns">
-              <div>
-                <div class="doc-group-label">Основные</div>
-                <div id="caseTemplatesBoxMain" class="upload-zone"></div>
-              </div>
-              <div>
-                <div class="doc-group-label">Служебные</div>
-                <div id="caseTemplatesBoxService" class="upload-zone"></div>
-              </div>
-            </div>
-
-            <div id="caseNarrativeBox" style="margin-top:22px;">
-              <h2 style="font-size:15px;margin:0 0 10px;">Фабула дела</h2>
-              <div class="upload-zone" style="max-width:none;">
-                <div style="margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);">
-                  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
-                    <strong style="font-size:12.5px;color:var(--ink);">Сканы документов (медсправки, эпикризы, отказы и т.п.)</strong>
-                    <label class="btn btn-sm" style="margin:0;">
-                      Загрузить файлы
-                      <input type="file" id="caseAttachmentInput" accept="image/jpeg,image/png,image/webp,application/pdf" multiple style="display:none;" onchange="uploadCaseAttachments(this.files)">
-                    </label>
-                  </div>
-                  <div style="color:var(--muted);font-size:11.5px;margin-bottom:8px;">JPG, PNG, WEBP или PDF, до 15 МБ на файл. Файлы уходят во внешний ИИ-сервис вместе с текстом фабулы при разборе — не загружайте лишнего.</div>
-                  <div id="caseAttachmentsList"></div>
-                  <div class="login-error" id="caseAttachmentsError" style="margin-top:8px;"></div>
-                </div>
-
-                <div class="field" style="margin-bottom:10px;">
-                  <textarea id="caseNarrativeText" rows="6" placeholder="Вставьте сюда сырой текст фабулы от клиента — ИИ попробует найти в нём значения для простых полей формы (ФИО, даты, адреса и т.п.)"
-                    oninput="scheduleSaveNarrative()"></textarea>
-                </div>
-                <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-                  <button class="btn-primary btn-sm" id="aiExtractBtn" onclick="runAiAnalyze()">✨ Разобрать дело через ИИ</button>
-                  <button class="btn btn-sm" id="aiDraftBtn" onclick="runAiDraftFields()">📝 Собрать обстоятельства дела</button>
-                  <span id="aiExtractHint" style="color:var(--muted);font-size:12px;"></span>
-                </div>
-                <div class="login-error" id="aiExtractError" style="margin-top:10px;"></div>
-                <div id="aiFactsPanel" style="display:none;margin-top:14px;padding:12px 14px;background:var(--surface-alt);border:1px solid var(--border);border-radius:var(--radius-s);">
-                  <div style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;" onclick="toggleAiFactsPanel()">
-                    <strong style="font-size:12.5px;">Факты, найденные ИИ (<span id="aiFactsCount">0</span>) — сверьте с источниками</strong>
-                    <span id="aiFactsToggleIcon">▾</span>
-                  </div>
-                  <ul id="aiFactsListBox" style="margin:10px 0 0;padding-left:18px;font-size:12.5px;color:var(--ink-soft);display:none;"></ul>
-                </div>
-              </div>
-            </div>
-
-            <div id="caseFormBox" style="display:none;">
-              <h2 style="font-size:15px;margin:26px 0 10px;">Данные дела</h2>
-              <div class="upload-zone" id="caseFieldsBox"></div>
-              <div style="color:var(--muted);font-size:12px;margin-bottom:8px;">Данные сохраняются автоматически по мере ввода</div>
-              <button class="btn-primary" id="generateDocsBtn" onclick="generateDocuments()">Сгенерировать документы</button>
-              <div class="login-error" id="caseFormError" style="margin-top:10px;"></div>
-            </div>
-
-            <div id="caseDocsBox" style="display:none;">
-              <h2 style="font-size:15px;margin:26px 0 10px;">Готовые документы</h2>
-              <div class="table-wrap">
-                <table>
-                  <thead><tr><th>Документ</th><th>Создан</th><th></th></tr></thead>
-                  <tbody id="caseDocsBody"></tbody>
-                </table>
-              </div>
-              <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap;">
-                <button class="btn-primary" onclick="downloadAllCaseDocuments('docx')">Скачать пакет в docx</button>
-                <button class="btn-primary" onclick="downloadAllCaseDocuments('pdf')">Скачать пакет в PDF</button>
-              </div>
+      <div class="case-preview">
+        <div class="doc-tabs" id="docGroupTabs"></div>
+        <div class="pv-card">
+          <div class="doc-tabs" id="docTabs"></div>
+          <div class="pv-head">
+            <div class="dt" id="docPreviewTitle">—</div>
+            <div class="doc-actions">
+              <button class="btn btn-sm" id="docEditBtn" onclick="startEditDoc()">Редактировать</button>
+              <button class="btn-primary btn-sm" id="docSaveEditBtn" style="display:none;" onclick="saveEditDoc()">Сохранить</button>
+              <button class="btn btn-sm" id="docCancelEditBtn" style="display:none;" onclick="cancelEditDoc()">Отмена</button>
+              <button class="btn btn-sm" id="docResetEditBtn" style="display:none;color:var(--danger);" onclick="resetEditDoc()">Сбросить правки</button>
             </div>
           </div>
-
-          <div>
-            <div class="doc-tabs" id="docGroupTabs"></div>
-            <div class="doc-tabs" id="docTabs" style="margin-top:4px;"></div>
-            <div class="doc-preview-panel">
-              <div class="doc-preview-head">
-                <div class="dt" id="docPreviewTitle">—</div>
-                <div class="doc-actions">
-                  <button class="btn btn-sm" id="docEditBtn" onclick="startEditDoc()">✎ Редактировать</button>
-                  <button class="btn-primary btn-sm" id="docSaveEditBtn" style="display:none;" onclick="saveEditDoc()">Сохранить</button>
-                  <button class="btn btn-sm" id="docCancelEditBtn" style="display:none;" onclick="cancelEditDoc()">Отмена</button>
-                  <button class="btn btn-sm" id="docResetEditBtn" style="display:none;color:var(--wine);" onclick="resetEditDoc()">Сбросить правки</button>
-                </div>
-              </div>
-              <div class="doc-body" id="docBody"><div class="doc-body-empty">Отметьте документ слева, чтобы увидеть предпросмотр</div></div>
-            </div>
-          </div>
+          <div class="pv-label">Предпросмотр</div>
+          <div class="doc-body" id="docBody"><div class="doc-body-empty">Отметьте документ в «Шаблонах для этого дела», чтобы увидеть предпросмотр</div></div>
         </div>
       </div>
+    </div>
 
       <!-- ===== АДМИН: КАТЕГОРИИ ===== -->
       <div class="screen" id="screen-admin-categories">
@@ -486,11 +551,10 @@
       </div>
 
     </div>
-  </div>
 </div>
 
 <div class="toast" id="toast"></div>
 
-<script src="app.js?v=24"></script>
+<script src="app.js?v=25"></script>
 </body>
 </html>

@@ -191,7 +191,7 @@ tr:last-child td{border-bottom:none;}
 .toast.show{opacity:1;}
 
 /* ---------- мастер «Новое дело» ---------- */
-.wiz-crumbs{display:flex;flex-wrap:wrap;gap:6px 6px;margin:0 0 30px;}
+.wiz-crumbs{display:flex;flex-wrap:wrap;gap:6px 6px;margin:0 0 30px;padding: 0 0 15px;border-bottom: 1px solid;border-color: var(--border);}
 .crumb{display:flex;align-items:center;gap:8px;background:none;border:0;padding:0;text-align:left;}
 .crumb-in{display:block;}
 .crumb small{display:block;color:var(--muted);font-size:12.5px;}
